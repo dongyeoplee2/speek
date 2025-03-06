@@ -1,6 +1,7 @@
 import subprocess
 from glob import glob
 import csv
+import re
 
 import argparse
 from datetime import datetime, timedelta
@@ -32,7 +33,7 @@ def get_scontrol_dict(unit):
     for scontrol in scontrol_str.split(delimiter):
         if not scontrol: continue
         n, *infos = [i for i in scontrol.split('\n') if i]
-        if unit == 'Job': n = int(n)
+        if unit == 'Job': n = int(n) if n!='No' else 0
         
         scontrols[n] = {}
         for info in infos:
@@ -99,7 +100,7 @@ def get_slurm_resource():
     ##############################################
 
     partitions, jobs = map(get_scontrol_dict, ('Partition', 'Job'))
-    
+        
     gres_names = ['GRES/gpu', 'gres/gpu']
     
     for gres in gres_names:
@@ -130,7 +131,7 @@ def get_slurm_resource():
             if j_status in status:
                 job_name = job['JobName']
                 user, gpu = job['UserId'].split('(')[0].strip(), job['Partition']
-                gpu_count = int(job.get('TresPerNode', 'gres:gpu:0').split(':')[-1])
+                gpu_count = int(re.split(':|=', job.get('TresPerNode', 'gres:gpu:0'))[-1])
                 
                 if isinstance(gpu, tuple):
                     gpu = tuple(sorted(gpu, key=lambda x: float(partitions[x]['TRESBillingWeights'][gres]), reverse=True))
@@ -194,7 +195,7 @@ def get_slurm_resource():
         gpu_resource[gpu]['Usage'] = f"{(gpu_resource[gpu]['Total'] - gpu_resource[gpu]['Available'])/gpu_resource[gpu]['Total']*100:.2f}%"
         
         for s in status:
-            max_user = max(user_status.items(), key=lambda x: x[1].get(gpu, NewState(status))[s])
+            max_user = max(user_status.items(), key=lambda x: x[1].get(gpu, NewState(status))[s]) if user_status else (None, NewState(status))
             gpu_resource[gpu][f'max_{s}_user'] = max_user[0] if max_user[1].get(gpu, NewState(status))[s] else None
 
     ####################################################
