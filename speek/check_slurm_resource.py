@@ -1,6 +1,7 @@
 import subprocess
 from glob import glob
 import csv
+import re
 
 import argparse
 from datetime import datetime, timedelta
@@ -32,7 +33,7 @@ def get_scontrol_dict(unit):
     for scontrol in scontrol_str.split(delimiter):
         if not scontrol: continue
         n, *infos = [i for i in scontrol.split('\n') if i]
-        if unit == 'Job': n = int(n)
+        if unit == 'Job': n = int(n) if n!='No' else 0
         
         scontrols[n] = {}
         for info in infos:
@@ -45,7 +46,7 @@ def get_scontrol_dict(unit):
             elif '=' in v:
                 scontrols[n][k] = dict([i.split('=') for i in v.split(',')])
             else:
-                scontrols[n][k] = v.split(',')
+                scontrols[n][k] = tuple(v.split(','))
     return scontrols
 
 def td_parse(s):
@@ -99,7 +100,7 @@ def get_slurm_resource():
     ##############################################
 
     partitions, jobs = map(get_scontrol_dict, ('Partition', 'Job'))
-    
+        
     gres_names = ['GRES/gpu', 'gres/gpu']
     
     for gres in gres_names:
@@ -123,55 +124,61 @@ def get_slurm_resource():
     t_width, t_unit = args.t_avail.split()
     tw = timedelta(**{td_str[t_unit]: int(t_width)})
 
-    for id, job in jobs.items():
-        j_status = job.get('JobState', None)
-        
-        if j_status in status:
-            job_name = job['JobName']
-            user, gpu = job['UserId'].split('(')[0].strip(), job['Partition']
-            gpu_count = int(job.get('TresPerNode', 'gres:gpu:0').split(':')[-1])
+    if jobs:
+        for id, job in jobs.items():
+            j_status = job.get('JobState', None)
+            
+            if j_status in status:
+                job_name = job['JobName']
+                user, gpu = job['UserId'].split('(')[0].strip(), job['Partition']
+                gpu_count = int(re.split(':|=', job.get('TresPerNode', 'gres:gpu:0'))[-1])
+                
+                if isinstance(gpu, tuple):
+                    gpu = tuple(sorted(gpu, key=lambda x: float(partitions[x]['TRESBillingWeights'][gres]), reverse=True))
+                    gpu_one = gpu[0]
+                else:
+                    gpu_one = gpu
+                
+                if partitions[gpu_one]['TRESBillingWeights'][gres]=='0': continue
+                
+                # user status
+                u_stat = user_status.get(user, NewState(status))
+                u_stat[gpu_one] = u_stat.get(gpu, NewState(status))
+                
+                u_stat[j_status] += gpu_count
+                u_stat[gpu_one][j_status] += gpu_count
+                
+                user_status[user] = u_stat
+                
+                uj_stat = user_job_status.get(user, {})
+                uj_stat[job_name] = uj_stat.get(job_name, {})
+                
+                uj_stat[job_name][gpu] = uj_stat[job_name].get(gpu, {s:[] for s in status})
+                uj_stat[job_name][gpu][j_status].append((id, gpu_count))
+                
+                user_job_status[user] = uj_stat
 
-            if partitions[gpu]['TRESBillingWeights'][gres]=='0': continue
-            
-            # user status
-            u_stat = user_status.get(user, NewState(status))
-            u_stat[gpu] = u_stat.get(gpu, NewState(status))
-            
-            u_stat[j_status] += gpu_count
-            u_stat[gpu][j_status] += gpu_count
-            
-            user_status[user] = u_stat
-            
-            uj_stat = user_job_status.get(user, {})
-            uj_stat[job_name] = uj_stat.get(job_name, {})
-            
-            uj_stat[job_name][gpu] = uj_stat[job_name].get(gpu, {s:[] for s in status})
-            uj_stat[job_name][gpu][j_status].append((id, gpu_count))
-            
-            user_job_status[user] = uj_stat
-
-
-            # gpu status
-            gpu_resource[gpu] = gpu_resource.get(gpu, NewState(resource))
-            
-            if j_status=='RUNNING':
-                gpu_resource['Available'] -= gpu_count
-                gpu_resource[gpu]['Available'] -= gpu_count
-            
-                time_left = {'td': td_parse(job['TimeLimit'])- td_parse(job['RunTime']),
-                            'count': gpu_count, 'user': user}
+                # gpu status
+                gpu_resource[gpu] = gpu_resource.get(gpu, NewState(resource))
                 
-                up_re = gpu_resource[gpu].get('Upcomming release', [time_left, [time_left]])
-                up_re[0] = min(time_left, up_re[0], key=lambda x: x['td'])
+                if j_status=='RUNNING':
+                    gpu_resource['Available'] -= gpu_count
+                    gpu_resource[gpu]['Available'] -= gpu_count
                 
-                up_re[1].append(time_left)
-                up_re[1] = [t for t in up_re[1] if t['td']-up_re[0]['td']<tw]
-                
-                up_re[0]['total_count'] = sum([t['count'] for t in up_re[1]])
-                td = up_re[0]['td']
-                up_re[0]['str'] = (f'{td.days}-' if td.days else '') + f"{str(td).split(', ')[-1][:-3]} ({up_re[0]['total_count']})"
-                
-                gpu_resource[gpu]['Upcomming release'] = up_re
+                    time_left = {'td': td_parse(job['TimeLimit'])- td_parse(job['RunTime']),
+                                'count': gpu_count, 'user': user}
+                    
+                    up_re = gpu_resource[gpu].get('Upcomming release', [time_left, [time_left]])
+                    up_re[0] = min(time_left, up_re[0], key=lambda x: x['td'])
+                    
+                    up_re[1].append(time_left)
+                    up_re[1] = [t for t in up_re[1] if t['td']-up_re[0]['td']<tw]
+                    
+                    up_re[0]['total_count'] = sum([t['count'] for t in up_re[1]])
+                    td = up_re[0]['td']
+                    up_re[0]['str'] = (f'{td.days}-' if td.days else '') + f"{str(td).split(', ')[-1][:-3]} ({up_re[0]['total_count']})"
+                    
+                    gpu_resource[gpu]['Upcomming release'] = up_re
 
 
     for gpu, info in partitions.items():
@@ -188,7 +195,7 @@ def get_slurm_resource():
         gpu_resource[gpu]['Usage'] = f"{(gpu_resource[gpu]['Total'] - gpu_resource[gpu]['Available'])/gpu_resource[gpu]['Total']*100:.2f}%"
         
         for s in status:
-            max_user = max(user_status.items(), key=lambda x: x[1].get(gpu, NewState(status))[s])
+            max_user = max(user_status.items(), key=lambda x: x[1].get(gpu, NewState(status))[s]) if user_status else (None, NewState(status))
             gpu_resource[gpu][f'max_{s}_user'] = max_user[0] if max_user[1].get(gpu, NewState(status))[s] else None
 
     ####################################################
@@ -257,9 +264,16 @@ def get_slurm_resource():
         for s in sorted(status, reverse=True):
             jobs_f = {k: {jn: j for jn, j in v.items() if j[s]} for k, v in jobs.items() if any(j[s] for j in v.values())}
             for i, (job_name, job) in enumerate(jobs_f.items()):
-                job_sorted = sorted(job.keys(), key=lambda x: gpu_resource[x]['Total']*float(partitions[x]['TRESBillingWeights'][gres]), reverse=True)
+                def keykey(gpu):
+                    if isinstance(gpu, tuple):
+                        gpu = sorted(gpu, key=lambda x: float(partitions[x]['TRESBillingWeights'][gres]))[-1]
+                    return gpu_resource[gpu]['Total']*float(partitions[gpu]['TRESBillingWeights'][gres])
+                job_sorted = sorted(job.keys(), key=keykey, reverse=True)
+                # job_sorted = sorted(job.keys(), key=lambda x: gpu_resource[x]['Total']*float(partitions[x]['TRESBillingWeights'][gres]), reverse=True)
                 for j, gpu in enumerate(job_sorted):
                     ids = job[gpu][s]
+                    if isinstance(gpu, tuple):
+                        gpu = '{' + ',\n '.join(gpu) + '}'
                     table2.add_row(s if i+j==0 else '', job_name if j==0 else '', gpu, str(len(ids)), consecutor([id for id, _ in ids]), end_section=((i==len(jobs_f)-1) and (j==len(job_sorted)-1)))
             
         # print(' \n ')
