@@ -43,3 +43,11 @@ Repository = "https://github.com/edong6768/speek.git"
 dev = [
     "pytest>=8.3.5",
 ]
+docs = [
+    "sphinx>=7.0",
+    "sphinx-book-theme",
+    "myst-parser",
+    "sphinx-autoapi",
+    "sphinx-copybutton",
+    "sphinx-design",
+]

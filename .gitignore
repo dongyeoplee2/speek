@@ -2,3 +2,7 @@ __pycache__
 *.egg-info
 
 tmp/
+
+# Docs build artifacts
+docs/_build/
+docs/api/

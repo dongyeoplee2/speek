@@ -1,0 +1,18 @@
+.navbar-brand img,
+.sidebar-brand img {
+    max-height: 3.5rem;
+    width: auto;
+}
+
+.logo__image.only-light {
+    filter: none;
+}
+
+.logo__image.only-dark {
+    filter: invert(1);
+}
+
+.navbar-brand .title,
+.sidebar-brand-text {
+    display: none !important;
+}
