@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import subprocess, re, argparse, time, os
+import subprocess, re, argparse, time
 from collections import defaultdict
 from typing import Optional, Dict, Set, Tuple, List
 from datetime import datetime, timedelta
@@ -11,15 +11,10 @@ from rich.text import Text
 from rich.live import Live
 from rich.console import Group
 
-# --- a-priori predictors (from slurm_predict.py) ---
+# predict_pending_job_eta used only in my_jobs_table for PENDING ETA
 try:
-    from slurm_predict import (
-        predict_max_nonpending_gpus,
-        predict_pending_job_eta,
-    )
+    from speek.slurm_predictor import predict_pending_job_eta
 except Exception:
-    def predict_max_nonpending_gpus(gpu: str, when_str: str) -> int:
-        return 0
     def predict_pending_job_eta(jobid: int, details: bool = False):
         return (None, {}) if details else None
 
@@ -32,14 +27,14 @@ parser.add_argument(
     help='Live display, refresh every 1s.'
 )
 parser.add_argument(
-    '--sbatch', type=str, default=None,
-    help='(unused by predictor now) Path to an sbatch script; still parsed for display hints.'
-)
-parser.add_argument(
     '-u','--user', type=str, default=None,
     help='User to show jobs for (default: current user).'
 )
-parser.set_defaults(live=False)
+parser.add_argument(
+    '-n','--nodes', action='store_true',
+    help='Show per-node GPU bars grouped by partition.'
+)
+parser.set_defaults(live=False, nodes=False)
 
 args = parser.parse_args()
 
@@ -47,7 +42,8 @@ args = parser.parse_args()
 GPU_TOTAL_RE = re.compile(r'gpu:([A-Za-z0-9\-]+):(\d+)', re.IGNORECASE)
 GPU_USED_RE  = re.compile(r'gpu:([A-Za-z0-9\-]+):(\d+)', re.IGNORECASE)
 REQ_GPU_RE   = re.compile(r'gpu:([A-Za-z0-9\-]+):(\d+)', re.IGNORECASE)
-SB_GRES_RE   = re.compile(r'--gres=.*?gpu(?::([A-Za-z0-9\-]+))?(?::(\d+))?', re.IGNORECASE)
+# Flexible: matches gpu:MODEL:N, gpu:N, gres/gpu:N — for node-level counting
+GPU_FLEX_RE  = re.compile(r'gpu(?::[A-Za-z0-9_\-]+)?:(\d+)', re.IGNORECASE)
 
 # ---------------------- Helpers ----------------------
 def normalize_model(m: str) -> str:
@@ -63,6 +59,12 @@ def looks_like_gpu_model(s: str) -> bool:
     if not s: return False
     s = s.upper()
     return any(tag in s for tag in ['A100','A6000','A5000','H100','H200','L40','3090','4090','TITAN','2080'])
+
+def _parse_gres_count(gres_str: str) -> int:
+    """Extract GPU count from a gres string; strips (IDX:...) suffixes first."""
+    s = re.sub(r'\(IDX:[^)]*\)', '', gres_str or '')
+    m = GPU_FLEX_RE.search(s)
+    return int(m.group(1)) if m else 0
 
 def usage_emoji(pct: float) -> str:
     if pct >= 100: return '☠️ '
@@ -164,6 +166,100 @@ def aggregate(rows):
         agg[model]['Total'] += t
         agg[model]['Used']  += u
     return dict(agg), model_parts
+
+# -------- Per-node / per-partition view --------
+
+def aggregate_nodes_by_partition(rows) -> Dict[str, List[Tuple[str, int, int]]]:
+    """
+    Returns {partition: [(host, total_gpus, used_gpus), ...]} for GPU nodes only.
+    Nodes that appear in multiple partitions show up once per partition.
+    Sorted per partition by used GPUs descending, then hostname.
+    """
+    seen: Dict[Tuple[str, str], Tuple[int, int]] = {}
+    for host, part, gres, gres_used in rows:
+        total = _parse_gres_count(gres)
+        if total == 0:
+            continue
+        used = min(_parse_gres_count(gres_used), total)
+        p = part or 'unknown'
+        key = (host, p)
+        prev = seen.get(key)
+        if prev is None or used > prev[1]:
+            seen[key] = (total, used)
+    result: Dict[str, List[Tuple[str, int, int]]] = defaultdict(list)
+    for (host, p), (total, used) in seen.items():
+        result[p].append((host, total, used))
+    return {
+        p: sorted(nodes, key=lambda x: (-x[2], x[0]))
+        for p, nodes in sorted(result.items())
+    }
+
+def _node_bar(used: int, total: int, width: Optional[int] = None) -> Text:
+    """Compact block progress bar. Default width = min(total, 16) so 1 char ≈ 1 GPU."""
+    w = width if width is not None else min(max(total, 1), 16)
+    pct = used / total if total else 0.0
+    filled = int(round(pct * w))
+    if pct <= 0.30:
+        color = 'blue'
+    elif pct <= 0.70:
+        color = 'orange1'
+    else:
+        color = 'red'
+    bar = Text()
+    bar.append('█' * filled,      style=f'bold {color}')
+    bar.append('░' * (w - filled), style='dim')
+    return bar
+
+def build_node_table(rows) -> Optional['Align']:
+    """Per-partition, per-node GPU bar table. Returns None if no GPU nodes found."""
+    node_data = aggregate_nodes_by_partition(rows)
+    if not node_data:
+        return None
+    def _avail_color(free: int, total: int) -> str:
+        pct = free / total if total else 0.0
+        if pct >= 0.50: return 'bold green'
+        if pct >= 0.20: return 'bold yellow'
+        return 'bold red'
+
+    def _row_style(free: int, total: int) -> str:
+        pct = free / total if total else 0.0
+        if pct >= 0.50: return 'on color(22)'   # dark green tint: submit here
+        if pct < 0.20:  return 'dim'             # nearly full: recede
+        return ''
+
+    table = Table(title='Node GPU Usage by Partition', show_header=True, header_style='bold')
+    table.add_column('Partition / Node', no_wrap=True, min_width=14)
+    table.add_column('Free', justify='right', min_width=5)
+    table.add_column('Bar', no_wrap=True, min_width=16)
+    table.add_column('/Tot', justify='right', min_width=4)
+    table.add_column('', width=3)
+
+    for part, nodes in node_data.items():
+        part_total = sum(t for _, t, _ in nodes)
+        part_used  = sum(u for _, _, u in nodes)
+        part_free  = part_total - part_used
+        pct        = part_used / part_total if part_total else 0.0
+        # partition header: always full brightness (it's a summary, not a target)
+        table.add_row(
+            Text(part, style='bold cyan'),
+            Text(str(part_free), style=_avail_color(part_free, part_total)),
+            _node_bar(part_used, part_total, width=20),
+            Text(f'/{part_total}', style='dim'),
+            Text(usage_emoji(pct * 100)),
+        )
+        for host, total, used in nodes:
+            free  = total - used
+            pct_n = used / total if total else 0.0
+            table.add_row(
+                Text(f'  {host}'),
+                Text(str(free), style=_avail_color(free, total)),
+                _node_bar(used, total),
+                Text(f'/{total}', style='dim'),
+                Text(usage_emoji(pct_n * 100)) if pct_n >= 1.0 or pct_n == 0.0 else '',
+                style=_row_style(free, total),
+            )
+        table.add_section()
+    return Align(table, align='center')
 
 # -------- Simple colored progress bar function --------
 def make_colored_progress_bar(pct: float, text: str) -> Text:
@@ -284,28 +380,36 @@ def cluster_user_tuple(
             break
     return (using_users, k, accounts_all)
 
-def parse_sbatch_file(path: Optional[str]) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[int]]:
-    if not path or not os.path.isfile(path):
-        return (None, None, None, None)
-    part = qos = None
-    g_model = None
-    g_count = None
-    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-        for raw in f:
-            line = raw.strip()
-            if not line.startswith('#SBATCH'):
-                continue
-            m = re.search(r'(?:-p|--partition)\s+([^\s#]+)', line) or re.search(r'--partition=([^\s#]+)', line)
-            if m: part = m.group(1).strip()
-            m = re.search(r'--qos\s+([^\s#]+)', line) or re.search(r'--qos=([^\s#]+)', line)
-            if m: qos = m.group(1).strip()
-            m = SB_GRES_RE.search(line)
-            if m:
-                if m.group(1): g_model = normalize_model(m.group(1))
-                if m.group(2):
-                    try: g_count = int(m.group(2))
-                    except: pass
-    return (part, qos, g_model, g_count)
+# ---------------------- My job counts per model ----------------------
+def my_job_counts_by_model(user: Optional[str]) -> Dict[str, Dict[str, int]]:
+    """Returns {model: {'R': N, 'PD': N}} for the current user."""
+    counts: Dict[str, Dict[str, int]] = defaultdict(lambda: {'R': 0, 'PD': 0})
+    if not user:
+        return counts
+    try:
+        out = subprocess.check_output(
+            ['squeue', '-u', user, '-o', '%T|%P|%b', '-h'],
+            text=True, stderr=subprocess.DEVNULL
+        )
+    except Exception:
+        return counts
+    for ln in out.splitlines():
+        if not ln.strip(): continue
+        state, part, gres = (ln.split('|') + ['', '', ''])[:3]
+        state = state.strip().upper()
+        m = REQ_GPU_RE.search(gres or '')
+        if m:
+            model = normalize_model(m.group(1))
+        elif looks_like_gpu_model(part):
+            model = normalize_model(part)
+        else:
+            continue
+        if state == 'RUNNING':
+            counts[model]['R'] += 1
+        elif state == 'PENDING':
+            counts[model]['PD'] += 1
+    return counts
+
 
 # ---------------------- Job counts by model ----------------------
 def job_counts_by_model() -> Dict[str, Dict[str, int]]:
@@ -346,7 +450,7 @@ def color_avail_text(avail: int, total: int) -> Text:
     return Text(str(avail), style=f"bold {color}")
 
 # ---------------------- Build usage table ----------------------
-def build_usage_table(agg, model_parts, part_weights):
+def build_usage_table(agg, model_parts, part_weights, user: Optional[str] = None):
     # sort columns by weighted capacity (Total * max part weight)
     weight = {
         m: max((part_weights.get(p, 0.0) for p in parts), default=0.0)
@@ -362,16 +466,31 @@ def build_usage_table(agg, model_parts, part_weights):
     gtot = sum(agg[m]['Total'] for m in cols)
     gusa = sum(agg[m]['Used']  for m in cols)
 
-    # users (RUNNING) — model-aware from squeue
-    per_model_user, total_used, _using_accounts = running_user_gpu_usage_model_aware()
-    accounts_all = total_accounts_candidate_users()
-    using_users, top80_users, accounts_num = cluster_user_tuple(per_model_user, total_used, accounts_all)
-
-    # job counts by model
+    # job counts by model (all users)
     jc = job_counts_by_model()
 
-    # optional sbatch guidance (not used by predictor, but kept)
-    sb_part, sb_qos, sb_gmodel, sb_gcount = parse_sbatch_file(args.sbatch)
+    # my job counts by model
+    my_jc = my_job_counts_by_model(user)
+
+    def _col_bg(m):
+        """
+        Piecewise: dark-green → neutral-charcoal → dark-red.
+        Routes through a neutral midpoint to avoid the muddy olive/brown
+        that HSV hue rotation produces at 50% usage.
+        """
+        tot = agg[m]['Total']
+        p = agg[m]['Used'] / tot if tot else 0.0
+        p = max(0.0, min(1.0, p))
+        G = (0x18, 0x30, 0x99)   # bright blue  (all free)
+        N = (0x1e, 0x1e, 0x2a)   # dark blue-neutral (half used)
+        R = (0x33, 0x18, 0x18)   # dark crimson      (exhausted)
+        if p <= 0.5:
+            t = p * 2
+            c = tuple(int(a + t * (b - a)) for a, b in zip(G, N))
+        else:
+            t = (p - 0.5) * 2
+            c = tuple(int(a + t * (b - a)) for a, b in zip(N, R))
+        return f'on #{c[0]:02x}{c[1]:02x}{c[2]:02x}'
 
     # Build table
     table = Table(title="Cluster Usage")
@@ -379,10 +498,17 @@ def build_usage_table(agg, model_parts, part_weights):
     for m in cols:
         used, tot = agg[m]['Used'], agg[m]['Total']
         pct = (used / tot * 100) if tot else 0.0
-        table.add_column(f"{usage_emoji(pct)}{m}⋅{tot}", justify="right")
+        bg = _col_bg(m)
+        table.add_column(
+            f"{usage_emoji(pct)}{m}⋅{tot}",
+            justify="right",
+            style=bg,
+            header_style=f"bold {bg}".strip(),
+        )
     table.add_column(f"Total⋅{gtot}", justify="right")
 
-    # Usage row: colored progress bars (show % and fill/empty counts)
+    # Usage row: left=used (colored fill), right=available (dim number)
+    # Column background provides the availability signal — see add_column below
     def make_bar(used: int, tot: int, width=8) -> Text:
         pct = used/tot if tot else 0.0
         if pct <= 0.30:
@@ -398,69 +524,37 @@ def build_usage_table(agg, model_parts, part_weights):
 
         result = Text()
         result.append(f"{round(pct*100)}%⋅", style=bg_color)
-        result.append(f"|{used:<{fw}}", style="bright_black")
-        result.append(f"{avail:>{aw}}", style=f"bold {text_color} on {bg_color}")
-        result.append("|", style="bright_black")
+        result.append(f"|{used:<{fw}}", style=f"bold {text_color} on {bg_color}")
+        result.append(f"{avail:>{aw}}|", style="bright_black")
         return result
 
     row_pct_colored = [make_bar(agg[m]['Used'], agg[m]['Total']) for m in cols]
     cluster_colored = make_bar(sum(agg[m]['Used'] for m in cols), gtot)
 
-    # Users row (per-GPU = distinct running users on that model; Total = using/top80/accounts_all)
-    row_users = [Text(str(len(per_model_user.get(m, {})))) for m in cols]
-    total_users_cell = Text(f"{using_users}/{top80_users}/{accounts_num}")
-
-    # Will it pend? (a-priori predictor from slurm_predict.py)
-    predict_row   = []
-    max_ok_row    = []  # NEW: maximum requestable GPUs without pending (per model)
-    max_ok_total  = 0
-    for m in cols:
-        avail_model = max(0, agg[m]['Total'] - agg[m]['Used'])
-        min_req = 3
-        max_req = max(min_req, int(round(0.8 * avail_model)))
-        max_req = min(max_req, max(min_req, avail_model))
-
-        model_for_pred = sb_gmodel or m
-        try:
-            max_nonpending = int(predict_max_nonpending_gpus(model_for_pred, "now"))
-        except Exception:
-            max_nonpending = 0
-
-        # traffic light based on min/max request sizes
-        small_ok = (max_nonpending >= min_req)
-        large_ok = (max_nonpending >= max_req)
-
-        if small_ok and large_ok:
-            color = "green";  symbol = "✔"
-        elif small_ok:
-            color = "orange1"; symbol = "⚠"
-        else:
-            color = "red";    symbol = "✘"
-
-        cell = Text(f"({min_req}/{max_req}) ") + Text(symbol + " ", style=color)
-        predict_row.append(cell)
-
-        # NEW row: max no-pend number
-        max_ok_row.append(Text(str(max_nonpending)))
-        max_ok_total += max_nonpending
-
-    # NEW: Jobs (R/P/T) row per model + total
+    # Jobs (R/P) row per model + total (all users)
     jobs_row = []
-    total_R = total_PD = total_T = 0
+    total_R = total_PD = 0
     for m in cols:
         R = jc.get(m, {}).get('R', 0)
         P = jc.get(m, {}).get('PD', 0)
-        T = jc.get(m, {}).get('T', 0)
-        jobs_row.append(Text(f"{R}/{P}/{T}"))
-        total_R += R; total_PD += P; total_T += T
-    jobs_total_cell = Text(f"{total_R}/{total_PD}/{total_T}")
+        jobs_row.append(Text(f"{R}/{P}"))
+        total_R += R; total_PD += P
+    jobs_total_cell = Text(f"{total_R}/{total_PD}")
+
+    # My jobs (R/P) row per model + total
+    my_jobs_row = []
+    my_total_R = my_total_PD = 0
+    for m in cols:
+        R = my_jc.get(m, {}).get('R', 0)
+        P = my_jc.get(m, {}).get('PD', 0)
+        my_jobs_row.append(Text(f"{R}/{P}") if (R or P) else Text(''))
+        my_total_R += R; my_total_PD += P
+    my_jobs_total = Text(f"{my_total_R}/{my_total_PD}") if (my_total_R or my_total_PD) else Text('')
 
     # Add rows
     table.add_row("Availability", *row_pct_colored, cluster_colored)
-    table.add_row("Will it pend", *predict_row, "")
-    table.add_row("Max no-pend",  *max_ok_row,    Text(str(max_ok_total)))   # NEW
-    table.add_row("Jobs (R/P/T)", *jobs_row,      jobs_total_cell)           # NEW
-    table.add_row("Users",        *row_users,     total_users_cell)
+    table.add_row("Jobs (R/P)",   *jobs_row,      jobs_total_cell)
+    table.add_row("My Jobs",      *my_jobs_row,   my_jobs_total)
 
     return Align(table, align='center')
 
@@ -586,18 +680,21 @@ def render_once():
     rows = parse_sinfo_rows()
     agg, model_parts = aggregate(rows)
     part_weights = get_partition_weights()
-    usage = build_usage_table(agg, model_parts, part_weights)
-
     try:
         me = args.user or subprocess.check_output(['whoami'], text=True).strip()
     except Exception:
         me = None
+    usage = build_usage_table(agg, model_parts, part_weights, user=me)
     jobs_block = my_jobs_table(me)
 
+    parts = [usage]
+    if args.nodes:
+        node_block = build_node_table(rows)
+        if node_block:
+            parts += [Text(''), node_block]
     if jobs_block:
-        return Group(usage, Text("\n"), jobs_block)
-    else:
-        return usage
+        parts += [Text(''), jobs_block]
+    return Group(*parts) if len(parts) > 1 else parts[0]
 
 # ---------------------- Entrypoint ----------------------
 def main():

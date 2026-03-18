@@ -1,0 +1,555 @@
+/* speek_max.scss — speek-max stylesheet */
+
+/* ── Scrollbars ─────────────────────────────────────────────────────────── */
+* {
+  scrollbar-color: $primary 10%;
+  scrollbar-color-hover: $primary 80%;
+  scrollbar-color-active: $primary;
+  scrollbar-background: $surface-darken-1;
+  scrollbar-background-hover: $surface-darken-1;
+  scrollbar-background-active: $surface-darken-1;
+  scrollbar-size-vertical: 1;
+
+  &:focus {
+    scrollbar-color: $primary 50%;
+  }
+}
+
+/* ── Root ───────────────────────────────────────────────────────────────── */
+Screen {
+  background: $background;
+}
+
+SpeekMax {
+  background: $background;
+}
+
+/* ── App title bar ──────────────────────────────────────────────────────── */
+#app-title {
+  height: 1;
+  width: 1fr;
+  background: transparent;
+  color: $primary;
+  text-style: bold;
+  padding: 0 1;
+}
+
+/* ── Layout: fill the screen properly ──────────────────────────────────── */
+#main-layout {
+  height: 1fr;
+  width: 1fr;
+}
+
+#left-panel {
+  width: 1fr;
+  height: 1fr;
+  padding: 0;
+  margin: 0;
+}
+
+#side-panel {
+  width: 30%;
+  height: 1fr;
+}
+
+TabbedContent {
+  height: 1fr;
+
+  & > ContentSwitcher {
+    height: 1fr;
+    background: transparent;
+  }
+}
+
+TabPane {
+  height: 1fr;
+  padding: 0 1 0 1;
+  background: transparent;
+}
+
+/* ── Tabs ───────────────────────────────────────────────────────────────── */
+Tabs {
+  background: transparent;
+  padding: 0 2;
+}
+
+Tab {
+  color: $foreground 40%;
+  background: transparent;
+  padding: 0 2;
+
+  &.-active {
+    color: $background;
+    background: $primary;
+    text-style: bold;
+    border: none;
+  }
+
+  &:hover {
+    color: $foreground;
+    background: $surface;
+  }
+}
+
+/* ── DataTable ──────────────────────────────────────────────────────────── */
+DataTable {
+  height: 1fr;
+  width: 1fr;
+  padding: 0 1;
+  background: transparent;
+
+  &:focus {
+    padding: 0;
+    border-left: inner $accent;
+  }
+}
+
+SpeekDataTable {
+  & > .datatable--header {
+    color: $text-success;
+    background: $surface;
+  }
+  & > .datatable--header-cursor {
+    color: $text;
+    background: $block-cursor-background;
+  }
+  & > .datatable--cursor {
+    background: $block-cursor-background;
+    color: $block-cursor-foreground;
+  }
+  &:blur {
+    & > .datatable--cursor {
+      background: transparent;
+    }
+    & > .datatable--header-cursor {
+      color: $text-success;
+      background: $surface;
+    }
+  }
+  & > .datatable--odd-row {
+    background: $surface 30%;
+  }
+  & > .datatable--even-row {
+    background: transparent;
+  }
+}
+
+/* ── Input ──────────────────────────────────────────────────────────────── */
+Input {
+  padding: 0 1;
+  height: 1;
+  border: none;
+  width: 1fr;
+  background: transparent;
+
+  &.-invalid {
+    padding-left: 0;
+    border-left: outer $error;
+  }
+  &:focus {
+    padding-left: 0;
+    border-left: outer $surface-lighten-1;
+    &.-invalid {
+      border-left: outer $error;
+    }
+  }
+}
+
+/* ── Button ─────────────────────────────────────────────────────────────── */
+Button {
+  padding: 0 1;
+  height: 1;
+  border: none;
+
+  &:disabled {
+    opacity: 40%;
+  }
+}
+
+/* ── Select ─────────────────────────────────────────────────────────────── */
+Select {
+  height: 1;
+  border: none;
+  padding: 0;
+
+  &:focus SelectCurrent {
+    background: $block-cursor-background;
+  }
+
+  SelectCurrent {
+    height: 1;
+    border: none;
+    padding: 0 1;
+    background: $surface;
+  }
+
+  & > SelectOverlay {
+    padding: 0;
+    border: none;
+  }
+}
+
+/* ── Footer ─────────────────────────────────────────────────────────────── */
+Footer {
+  padding-left: 2;
+  background: transparent;
+}
+
+/* ── LoadingIndicator ───────────────────────────────────────────────────── */
+LoadingIndicator {
+  height: 1;
+  color: $accent;
+  background: transparent;
+}
+
+/* ── RichLog ────────────────────────────────────────────────────────────── */
+SpeekRichLog {
+  background: transparent;
+  padding-left: 1;
+  height: 1fr;
+
+  &:focus {
+    border-left: wide $accent;
+    padding-left: 0;
+  }
+}
+
+/* ── TextArea ───────────────────────────────────────────────────────────── */
+TextArea {
+  border: none;
+  background: transparent;
+
+  &:focus {
+    border: none;
+    border-left: outer $surface-lighten-1;
+  }
+}
+
+/* ── AutoComplete ───────────────────────────────────────────────────────── */
+AutoComplete {
+  border-left: wide $accent;
+  background: $surface;
+
+  & AutoCompleteList {
+    color: $text-muted;
+    background: transparent;
+  }
+
+  & .autocomplete--highlight-match {
+    color: $text-accent;
+    background: $accent-muted;
+  }
+}
+
+/* ── Jump overlay ───────────────────────────────────────────────────────── */
+.textual-jump-label {
+  dock: top;
+  color: $text-accent;
+  background: $accent-muted;
+  text-style: bold;
+  padding: 0 1;
+  margin-right: 1;
+  offset-y: -1;
+  height: 1;
+  width: auto;
+}
+
+#textual-jump-info {
+  margin-bottom: 1;
+  dock: bottom;
+  height: 1;
+  width: 1fr;
+  background: $accent-muted;
+  color: $text-accent;
+  hatch: right $accent 30%;
+
+  & Label {
+    width: auto;
+    padding: 0 1;
+  }
+}
+
+/* ── Modals ─────────────────────────────────────────────────────────────── */
+ModalScreen {
+  background: black 30%;
+}
+
+.modal-body {
+  background: $background;
+  padding: 1 2;
+  width: 50%;
+  height: auto;
+  max-height: 70%;
+  border: wide $background-lighten-2;
+  border-title-color: $text;
+  border-title-background: $background;
+  border-title-style: bold;
+}
+
+ConfirmationModal > Vertical {
+  background: $background;
+  border: wide $error;
+  border-title-color: $text-error;
+  border-title-background: $background;
+  border-title-style: bold;
+  padding: 1 2;
+  width: 50%;
+  height: auto;
+  align: center middle;
+}
+
+/* ── .section pattern ───────────────────────────────────────────────────── */
+.section {
+  border: round $accent 40%;
+  border-title-color: $text-accent 50%;
+  border-title-align: right;
+
+  &:focus-within {
+    border: round $accent 100%;
+    border-title-color: $foreground;
+    border-title-style: bold;
+  }
+}
+
+.empty-state {
+  display: none;
+  height: 1fr;
+  width: 1fr;
+  hatch: right $surface-lighten-1 30%;
+  color: $text-muted;
+  content-align: center middle;
+  text-style: italic;
+}
+
+/* ── ClusterBar ─────────────────────────────────────────────────────────── */
+ClusterBar {
+  height: auto;
+  color: $text-primary;
+  padding: 0 3;
+  background: transparent;
+  border: round $accent 50%;
+  border-title-align: right;
+  margin: 0 1;
+
+  &:focus-within {
+    border: round $accent;
+  }
+}
+
+/* ── Panel widgets ──────────────────────────────────────────────────────── */
+QueueWidget,
+NodeWidget,
+PriorityWidget,
+SubmitWidget {
+  height: 1fr;
+  background: $surface 15%;
+  border: round $accent 40%;
+  border-title-align: right;
+  padding: 0 1;
+
+  &:focus-within {
+    border: round $primary;
+    border-title-color: $primary;
+    border-title-style: bold;
+  }
+}
+
+MyJobsWidget,
+HistoryWidget {
+  height: 1fr;
+  background: $surface 15%;
+  border: round $accent 40%;
+  border-title-align: right;
+  padding: 0 1;
+
+  &:focus-within {
+    border: round $primary;
+    border-title-color: $primary;
+    border-title-style: bold;
+  }
+}
+
+/* ── Config widget ──────────────────────────────────────────────────────── */
+ConfigWidget {
+  height: 1fr;
+  background: $surface 15%;
+  border: round $accent 40%;
+  border-title-align: right;
+  padding: 1 2;
+
+  &:focus-within {
+    border: round $primary;
+    border-title-color: $primary;
+    border-title-style: bold;
+  }
+}
+
+#config-content {
+  height: auto;
+  width: 1fr;
+}
+
+.config-section-header {
+  color: $primary;
+  text-style: bold;
+  padding: 0 0 0 0;
+  margin-top: 1;
+  width: 1fr;
+}
+
+.config-card {
+  background: $surface;
+  border: round $accent 40%;
+  padding: 0 1;
+  margin-bottom: 1;
+  width: 1fr;
+  height: auto;
+}
+
+.config-row {
+  height: 1;
+  width: 1fr;
+  padding: 0;
+  align: left middle;
+}
+
+.config-label {
+  width: 20;
+  color: $text;
+  padding: 0;
+  height: 1;
+}
+
+.config-value {
+  color: $primary;
+  text-style: bold;
+  padding: 0;
+  height: 1;
+  width: auto;
+}
+
+.config-desc {
+  color: $text-muted;
+  padding: 0 0 0 2;
+  height: 1;
+  width: 1fr;
+}
+
+#config-hint {
+  color: $text-muted;
+  padding: 1 0 0 0;
+  height: auto;
+}
+
+#config-about {
+  color: $text-muted;
+  padding: 1 0 0 0;
+  height: auto;
+}
+
+/* ── Queue stats bar ────────────────────────────────────────────────────── */
+#queue-stats {
+  height: 1;
+  padding: 0 1;
+  background: $surface 40%;
+  border-top: solid $accent 20%;
+  color: $text-muted;
+}
+
+/* ── History toolbar ────────────────────────────────────────────────────── */
+#history-toolbar {
+  height: 1;
+  padding: 0 1;
+  background: transparent;
+  border-bottom: solid $accent 20%;
+
+  & Label {
+    padding: 0 1;
+    color: $text-muted;
+    height: 1;
+  }
+
+  & Button {
+    height: 1;
+    border: none;
+    padding: 0 1;
+    background: $accent-muted;
+    color: $text-accent;
+    min-width: 10;
+    dock: right;
+  }
+}
+
+/* ── Users toolbar ──────────────────────────────────────────────────────── */
+#users-toolbar {
+  height: 1;
+  padding: 0 1;
+  background: transparent;
+  border-bottom: solid $accent 20%;
+
+  & Label {
+    padding: 0 1;
+    color: $text-muted;
+    height: 1;
+  }
+}
+
+/* ── SubmitWidget compact panel ─────────────────────────────────────────── */
+SubmitWidget {
+  height: auto;
+  background: #404040 40%;
+  border: none;
+  border-top: solid #606060 50%;
+  padding: 0;
+  margin: 0;
+}
+
+#submit-fields {
+  height: 1;
+  width: 1fr;
+  background: transparent;
+  padding: 0 1;
+}
+
+.submit-lbl {
+  width: auto;
+  padding: 0 1;
+  color: #909090;
+  height: 1;
+}
+
+#script-preview {
+  height: 1;
+  background: #303030 40%;
+  border: none;
+  border-top: solid #505050 40%;
+  padding: 0 1;
+}
+
+/* ── Submit / action buttons ────────────────────────────────────────────── */
+#submit-btn {
+  background: $success-muted;
+  color: $text-success;
+  text-style: bold;
+  min-width: 10;
+  height: 1;
+  border: none;
+  padding: 0 1;
+}
+
+#cancel-job-btn {
+  background: $error-muted;
+  color: $text-error;
+  min-width: 14;
+}
+
+#confirm-button {
+  background: $error-muted;
+  color: $text-error;
+  text-style: bold;
+}
+
+#cancel-button {
+  background: $surface-lighten-1;
+  color: $text-muted;
+}

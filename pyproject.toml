@@ -3,7 +3,7 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["speek"]
+packages = ["speek", "speek.data", "speek.speek_max", "speek.speek_max.widgets"]
 
 [project]
 name = "speek"
@@ -23,19 +23,23 @@ classifiers = [
     "Topic :: System :: Monitoring",
     "Topic :: Utilities",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
     "pandas>=2.0.3",
     'rich',
+    'textual>=0.50.0',
 ]
 
 [project.scripts]
-speek = "speek.check_slurm_resource:main"
+speek     = "speek.speek_classic:main"
+speek-min = "speek.speek_min:main"
+speek-max = "speek.speek_max.app:main"
 
 [project.urls]
 Repository = "https://github.com/edong6768/speek.git"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+]
