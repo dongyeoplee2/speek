@@ -56,8 +56,15 @@ def _load_read_ids() -> set[str]:
     return _load_cache()[0]
 
 
-def _save_read_ids(ids: set[str]) -> None:
+def _save_read_ids(ids: set[str], max_ids: int = 2000) -> None:
     _, last_act = _load_cache()
+    # Trim: keep only the most recent IDs (highest job numbers)
+    if len(ids) > max_ids:
+        try:
+            sorted_ids = sorted(ids, key=lambda x: int(x) if x.isdigit() else 0, reverse=True)
+            ids = set(sorted_ids[:max_ids])
+        except Exception:
+            pass
     _save_cache(ids, last_act)
 
 
@@ -97,12 +104,30 @@ _IND_KEY_PREFIX = 'ind::'
 _HISTORY_TC = '#history-tc'
 
 # (upper age bound in seconds, display label)
+def _time_zone_label(zone_idx: int) -> str:
+    """Generate divider label with actual date/time range."""
+    from datetime import timedelta
+    now = datetime.now()
+    bounds = [3600, 86400, 3*86400, 7*86400, float('inf')]
+    names = ['< 1h', '1h – 24h', '1d – 3d', '3d – 7d', '> 7d']
+    label = names[min(zone_idx, len(names)-1)]
+    # Add actual date
+    if zone_idx == 0:
+        return f'{label}  ({now.strftime("%H:%M")}–now)'
+    start_secs = bounds[zone_idx - 1] if zone_idx > 0 else 0
+    end_secs = bounds[zone_idx] if zone_idx < len(bounds) else float('inf')
+    start_dt = now - timedelta(seconds=end_secs) if end_secs != float('inf') else None
+    end_dt = now - timedelta(seconds=start_secs)
+    if start_dt:
+        return f'{label}  ({start_dt.strftime("%m/%d")}–{end_dt.strftime("%m/%d")})'
+    return f'{label}  (before {end_dt.strftime("%m/%d")})'
+
 _TIME_ZONE_BOUNDS = [
-    (3600,         'Last hour'),
-    (86400,        'Today (1h – 24h)'),
-    (3 * 86400,    'Last 3 days (1d – 3d)'),
-    (7 * 86400,    'Last week (3d – 7d)'),
-    (float('inf'), 'Older (> 1 week)'),
+    (3600,         '< 1h'),
+    (86400,        '1h – 24h'),
+    (3 * 86400,    '1d – 3d'),
+    (7 * 86400,    '3d – 7d'),
+    (float('inf'), '> 7d'),
 ]
 
 
@@ -336,7 +361,7 @@ class FullHistoryModal(SpeekModal):
             zone = _time_zone_idx(g['start'])
             if zone != current_zone:
                 current_zone = zone
-                label = _TIME_ZONE_BOUNDS[zone][1]
+                label = _time_zone_label(zone)
                 dt.add_row(*_divider_row(label, _N_HISTORY_COLS), key=f'{_DIV_KEY_PREFIX}{div_counter}')
                 div_counter += 1
             time_mode = getattr(self.app, '_time_format', 'relative')
@@ -663,7 +688,7 @@ class HistoryWidget(Widget):
                 zone = _time_zone_idx(g['start'])
                 if zone != current_zone:
                     current_zone = zone
-                    label = _TIME_ZONE_BOUNDS[zone][1]
+                    label = _time_zone_label(zone)
                     dt.add_row(*_divider_row(label, _N_HISTORY_COLS),
                                key=f'{_DIV_KEY_PREFIX}{div_counter}')
                     div_counter += 1
@@ -829,19 +854,19 @@ class HistoryWidget(Widget):
                 self._read_ids.add(jid)
             else:
                 self._read_ids.discard(jid)
-        _save_read_ids(self._read_ids)
+        _save_read_ids(self._read_ids, getattr(self.app, '_max_read_ids', 2000))
         self._refresh_all_tables()
 
     def _mark_all_read(self) -> None:
         for r in self._all_rows:
             self._read_ids.add(r[0])
-        _save_read_ids(self._read_ids)
+        _save_read_ids(self._read_ids, getattr(self.app, '_max_read_ids', 2000))
         self._refresh_all_tables()
 
     def _mark_all_unread(self) -> None:
         for r in self._all_rows:
             self._read_ids.discard(r[0])
-        _save_read_ids(self._read_ids)
+        _save_read_ids(self._read_ids, getattr(self.app, '_max_read_ids', 2000))
         self._refresh_all_tables()
 
     def action_toggle_read(self) -> None:
@@ -893,7 +918,7 @@ class HistoryWidget(Widget):
                     self._read_ids.discard(jid)
                 else:
                     self._read_ids.add(jid)
-        _save_read_ids(self._read_ids)
+        _save_read_ids(self._read_ids, getattr(self.app, '_max_read_ids', 2000))
         self._refresh_all_tables()
         self._post_counts()
 

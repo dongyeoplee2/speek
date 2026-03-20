@@ -55,6 +55,94 @@ def _highlight_log(content: Text) -> None:
         content.highlight_regex(pattern, style)
 
 
+# Error patterns to extract from log tail — (regex, label)
+_ERROR_PATTERNS = [
+    # Python
+    (r'(\w+Error: .+)',                         'Python error'),
+    (r'(\w+Exception: .+)',                     'Python exception'),
+    (r'(Traceback \(most recent call last\))',   'Traceback'),
+    (r'(AssertionError.*)',                      'Assertion'),
+    # CUDA / GPU
+    (r'(CUDA out of memory\..*)',               'CUDA OOM'),
+    (r'(CUDA error: .+)',                       'CUDA error'),
+    (r'(RuntimeError: CUDA.+)',                 'CUDA runtime'),
+    (r'(NCCL error.+)',                         'NCCL error'),
+    (r'(cuDNN error.+)',                        'cuDNN error'),
+    # System
+    (r'(Segmentation fault.*)',                 'Segfault'),
+    (r'(Killed)',                               'OOM killed'),
+    (r'(Bus error.*)',                          'Bus error'),
+    (r'(Permission denied.*)',                  'Permission'),
+    (r'(No such file or directory.*)',          'File not found'),
+    (r'(Disk quota exceeded.*)',               'Disk quota'),
+    # SLURM
+    (r'(slurmstepd: error:.+)',                'SLURM step error'),
+    (r'(DUE TO TIME LIMIT)',                   'Time limit'),
+    (r'(oom-kill:.+)',                         'OOM kill'),
+    # General
+    (r'(ImportError: .+)',                      'Import error'),
+    (r'(ModuleNotFoundError: .+)',             'Module not found'),
+    (r'(FileNotFoundError: .+)',               'File not found'),
+    (r'(KeyError: .+)',                        'Key error'),
+    (r'(ValueError: .+)',                      'Value error'),
+    (r'(TypeError: .+)',                       'Type error'),
+]
+
+
+def _extract_errors(log_text: str, tail_lines: int = 50) -> List[tuple[str, str]]:
+    """Extract error messages from the last N lines of log output.
+
+    Uses both regex patterns and fuzzy heuristics to catch unexpected errors.
+    Returns list of (label, matched_text) tuples.
+    """
+    import re
+    lines = log_text.splitlines()[-tail_lines:]
+    tail = '\n'.join(lines)
+    found: List[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    # 1. Known patterns
+    for pattern, label in _ERROR_PATTERNS:
+        for m in re.finditer(pattern, tail):
+            text = m.group(1).strip()[:200]
+            if text not in seen:
+                seen.add(text)
+                found.append((label, text))
+
+    # 2. Fuzzy heuristics — catch lines that look like errors but don't match known patterns
+    _ERROR_SIGNALS = re.compile(
+        r'(?i)\b(error|exception|fatal|critical|abort|panic|fail|denied|refused'
+        r'|cannot|could not|unable to|not found|no such|invalid|illegal'
+        r'|segfault|killed|oom|out of memory|exceeded|overflow|corrupt)\b'
+    )
+    _NOISE = re.compile(
+        r'(?i)^(\s*$|#|//|--|\d+[/%]|.*\blog\.?(ging)?\.?(info|debug|warn)|.*progress|.*eta\b|.*epoch)'
+    )
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or len(stripped) < 10 or len(stripped) > 300:
+            continue
+        if stripped in seen or _NOISE.match(stripped):
+            continue
+        if _ERROR_SIGNALS.search(stripped):
+            # Classify by signal word
+            lower = stripped.lower()
+            if 'memory' in lower or 'oom' in lower:
+                label = 'Memory'
+            elif 'permission' in lower or 'denied' in lower:
+                label = 'Permission'
+            elif 'not found' in lower or 'no such' in lower:
+                label = 'Not found'
+            elif 'timeout' in lower or 'exceeded' in lower:
+                label = 'Limit exceeded'
+            else:
+                label = 'Error'
+            seen.add(stripped)
+            found.append((label, stripped[:200]))
+
+    return found
+
+
 def _build_gpu_table(result: Dict) -> _RichTable:
     """Render fetch_job_gpu_stats result as a Rich table."""
     t = _RichTable(box=None, show_header=True, expand=True,
@@ -638,6 +726,15 @@ class JobInfoModal(SpeekModal):
                 lines.append(f'  [{c_muted}]Job exceeded its time limit[/]')
             elif state == 'OUT_OF_MEMORY':
                 lines.append(f'  [{c_muted}]Job exceeded memory allocation[/]')
+            # Extract errors from log
+            if self._log_content:
+                log_text = self._log_content.plain if hasattr(self._log_content, 'plain') else str(self._log_content)
+                errors = _extract_errors(log_text)
+                if errors:
+                    lines.append('')
+                    lines.append(f'  [bold {c_error}]── From Log ──[/]')
+                    for label, text in errors[:5]:
+                        lines.append(f'  [{c_warning}]{label}:[/]  [{c_error}]{text}[/]')
 
         elif state == 'RUNNING':
             lines.append(f'[bold {c_success}]── Running Status ──[/]')

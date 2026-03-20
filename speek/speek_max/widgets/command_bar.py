@@ -73,6 +73,11 @@ _BUILTIN_SUGGESTIONS: list[tuple[str, str]] = [
     ('conda env list',         'conda environments'),
     ('nvidia-smi',             'GPU status'),
     ('which python',           'python path'),
+    # Slash commands
+    ('/find ',                  'filter focused table'),
+    ('/theme ',                 'switch theme'),
+    ('/q',                     'quit speek-max'),
+    ('/help',                  'show slash commands'),
 ]
 
 # Per-command flag suggestions: (flag, description)
@@ -477,6 +482,12 @@ class CommandBar(Widget):
         if not raw:
             return
         self._hide_suggestions()
+        # Built-in slash commands
+        if raw.startswith('/'):
+            self._handle_slash(raw)
+            event.input.value = ''
+            self._history_index = -1
+            return
         if raw in ('exit', 'quit', 'q'):
             self.app.exit()
             return
@@ -885,6 +896,54 @@ class CommandBar(Widget):
     # ── Command execution ──────────────────────────────────────────────────
 
     _cwd: str = ''  # tracked working directory; empty = inherit
+
+    def _handle_slash(self, raw: str) -> None:
+        """Handle /commands — internal app commands, not shell."""
+        parts = raw.split(maxsplit=1)
+        cmd = parts[0].lower()
+        arg = parts[1] if len(parts) > 1 else ''
+
+        if cmd in ('/q', '/quit', '/exit'):
+            self.app.exit()
+        elif cmd == '/find':
+            if not arg:
+                self.app.notify('Usage: /find <text>', timeout=3)
+                return
+            # Trigger filter on the focused DataTable
+            from speek.speek_max.widgets.datatable import SpeekDataTable
+            try:
+                dt = self.app.focused
+                while dt and not isinstance(dt, SpeekDataTable):
+                    dt = dt.parent
+                if dt:
+                    dt._filter_active = True
+                    dt._filter_text = arg
+                    dt._stash_rows()
+                    dt._apply_filter()
+                    dt.border_subtitle = f'/{arg}'
+                    self._show_status(f'[dim]filtering: {arg}[/dim]')
+                else:
+                    self.app.notify('Focus a table first, then /find', timeout=3)
+            except Exception:
+                self.app.notify('Focus a table first', timeout=3)
+        elif cmd == '/theme':
+            if arg:
+                try:
+                    self.app.theme = arg
+                    self._show_status(f'[dim]theme: {arg}[/dim]')
+                except Exception:
+                    self.app.notify(f'Unknown theme: {arg}', severity='error')
+            else:
+                self.app.notify(f'Current: {self.app.theme}', timeout=3)
+        elif cmd == '/help':
+            self.app.notify(
+                '/find <text>  filter focused table\n'
+                '/theme <name>  switch theme\n'
+                '/q  quit',
+                title='Slash commands', timeout=10,
+            )
+        else:
+            self.app.notify(f'Unknown command: {cmd}\nTry /help', severity='warning')
 
     def _execute(self, raw: str) -> None:
         # Expand user alias

@@ -156,6 +156,19 @@ class SettingsWidget(Widget):
                         )
                         yield Static('how to show timestamps in tables', classes='config-desc')
 
+                # ── Storage ───────────────────────────────────────────
+                yield Label('Storage', classes='config-section-header')
+                with Vertical(classes='config-card'):
+                    with Horizontal(classes='config-row'):
+                        yield Label('Max read IDs', classes='config-label')
+                        yield SpeekSelect(
+                            [('500', 500), ('1000', 1000), ('2000', 2000), ('5000', 5000), ('10000', 10000)],
+                            value=2000,
+                            id='max-read-ids-select',
+                            allow_blank=False,
+                        )
+                        yield Static('max tracked read/unread job IDs', classes='config-desc')
+
                 # ── Highlights ────────────────────────────────────────
                 yield Label('Highlights', classes='config-section-header')
                 with Vertical(classes='config-card'):
@@ -224,6 +237,7 @@ class SettingsWidget(Widget):
             ('#issue-hours-select',      '_issue_hours'),
             ('#ping-duration-select',    '_ping_duration'),
             ('#event-fade-select',       '_event_fade'),
+            ('#max-read-ids-select',     '_max_read_ids'),
         ]:
             val = getattr(self.app, attr, None)
             if val is not None:
@@ -260,6 +274,8 @@ class SettingsWidget(Widget):
             self.app._ping_duration = int(val)
         elif sel_id == 'event-fade-select':
             self.app._event_fade = int(val)
+        elif sel_id == 'max-read-ids-select':
+            self.app._max_read_ids = int(val)
         elif sel_id in ('queue-refresh-select', 'node-refresh-select', 'history-refresh-select'):
             target = sel_id.replace('-refresh-select', '')
             self._apply_refresh(target, int(val))
@@ -330,6 +346,7 @@ class SettingsWidget(Widget):
         '_ping_duration':       10,
         '_event_fade':          600,
         '_time_format':         'relative',
+        '_max_read_ids':        2000,
     }
 
     def _gather_settings(self) -> dict:
@@ -390,6 +407,7 @@ class SettingsWidget(Widget):
             ('#issue-hours-select',      '_issue_hours'),
             ('#ping-duration-select',    '_ping_duration'),
             ('#event-fade-select',       '_event_fade'),
+            ('#max-read-ids-select',     '_max_read_ids'),
         ]:
             try:
                 self.query_one(sel_id, SpeekSelect).value = getattr(app, attr)

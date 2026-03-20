@@ -103,6 +103,8 @@ class SpeekMax(App[None]):
         self._event_fade: int = 600           # event row fade (seconds)
         # Display
         self._time_format: str = 'relative'   # relative | absolute | both
+        # Storage
+        self._max_read_ids: int = 2000        # max tracked read/unread IDs
         # Register all themes
         for name, theme in SPEEK_THEMES.items():
             try:

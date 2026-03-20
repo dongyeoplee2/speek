@@ -855,7 +855,16 @@ class MyJobsWidget(Widget):
                 zone = _hist_zone_idx(items[0]['start'])
                 if zone != current_zone:
                     current_zone = zone
-                    label = _HIST_TIME_ZONES[zone][1]
+                    from datetime import datetime as _dt, timedelta as _td
+                    _now = _dt.now()
+                    _bounds = [b for b, _ in _HIST_TIME_ZONES]
+                    _start = _now - _td(seconds=_bounds[zone]) if _bounds[zone] != float('inf') else None
+                    _end = _now - _td(seconds=_bounds[zone-1]) if zone > 0 else _now
+                    base_label = _HIST_TIME_ZONES[zone][1]
+                    if _start:
+                        label = f'{base_label}  ({_start.strftime("%m/%d")}–{_end.strftime("%m/%d")})'
+                    else:
+                        label = f'{base_label}  (before {_end.strftime("%m/%d")})'
                     div_cells = [Text(f'── {label} ', style='dim italic')] + [Text('')] * 6
                     key = f'{_HIST_DIV_PREFIX}{div_counter}'
                     dt.add_row(*div_cells, key=key)
