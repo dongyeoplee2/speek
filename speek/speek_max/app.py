@@ -1,4 +1,4 @@
-"""speek-max: SLURM cluster monitor TUI — built on Textual's widget infrastructure."""
+"""speek+: SLURM cluster monitor TUI — built on Textual's widget infrastructure."""
 from __future__ import annotations
 
 import argparse
@@ -17,7 +17,7 @@ from textual.widgets import Footer, Label, TabPane, TabbedContent
 
 
 from speek.speek_max.themes import DEFAULT_THEME, SPEEK_THEMES, THEME_NAMES
-from speek.speek_max._utils import tc
+from speek.speek_max._utils import tc, safe
 from speek.speek_max.widgets.cluster_bar import ClusterBar
 from speek.speek_max.widgets.settings_widget import SettingsWidget
 from speek.speek_max.widgets.confirmation import ConfirmationModal
@@ -56,10 +56,10 @@ class _SpeekScreen(Screen):
 
 
 class SpeekMax(App[None]):
-    """speek-max: SLURM cluster monitor TUI."""
+    """speek+: SLURM cluster monitor TUI."""
 
     CSS_PATH = Path(__file__).parent / "speek_max.scss"
-    TITLE = "speek-max"
+    TITLE = "speek+"
 
     def get_default_screen(self) -> _SpeekScreen:
         return _SpeekScreen()
@@ -75,6 +75,7 @@ class SpeekMax(App[None]):
         Binding("d", "view_details",           "Details",  show=True),
         Binding("f", "switch_focus",           "⇥ Focus",  show=True),
         Binding("colon", "focus_command",      "Shell",    show=True),
+        Binding("ctrl+r", "restart",             "Restart",  show=True),
         Binding("q", "quit",                   "Quit",     show=True),
     ]
 
@@ -137,28 +138,31 @@ class SpeekMax(App[None]):
         # Apply probe cache immediately (fast — just reads JSON), then
         # run a background probe on first launch or when cache is stale.
         self.run_worker(self._startup_probe, thread=True, group='probe')
+        self._update_clock()
+        self.set_interval(1, self._update_clock)
 
     def compose(self) -> ComposeResult:
         with Horizontal(id='app-title'):
-            yield Label('speek-max  [dim]v0.0.3[/dim]', id='app-title-left', markup=True)
+            yield Label('speek+  [dim]v0.0.3[/dim]', id='app-title-left', markup=True)
+            yield Label('', id='app-title-center', markup=True)
             yield Label('', id='app-title-right', markup=True)
         with Horizontal(id='main-layout'):
             with Vertical(id='left-panel'):
                 yield ClusterBar()
                 with TabbedContent(id='main-tabs'):
-                    with TabPane("Queue [1]", id="queue"):
+                    with TabPane("1 Queue", id="queue"):
                         yield QueueWidget()
-                    with TabPane("Nodes [2]", id="nodes"):
+                    with TabPane("2 Nodes", id="nodes"):
                         yield NodeWidget()
-                    with TabPane("Users [3]", id="users"):
+                    with TabPane("3 Users", id="users"):
                         yield UsersWidget()
-                    with TabPane("Stats [4]", id="stats"):
+                    with TabPane("4 Stats", id="stats"):
                         yield StatsWidget()
-                    with TabPane("Settings [5]", id="settings"):
+                    with TabPane("5 Settings", id="settings"):
                         yield SettingsWidget()
-                    with TabPane("Info [6]", id="sysinfo"):
+                    with TabPane("6 Info", id="sysinfo"):
                         yield SysInfoWidget()
-                    with TabPane("Help [7]", id="help"):
+                    with TabPane("7 Help", id="help"):
                         yield HelpWidget()
             yield PanelDivider()
             with Vertical(id='side-panel'):
@@ -293,6 +297,16 @@ class SpeekMax(App[None]):
 
     # ── Message handlers ──────────────────────────────────────────────────────
 
+    def _update_clock(self) -> None:
+        from datetime import datetime
+        now = datetime.now()
+        clock = now.strftime('%Y-%m-%d  %a  %H:%M:%S')
+        try:
+            self.query_one('#app-title-center', Label).update(f'[dim]{clock}[/dim]')
+        except Exception:
+            pass
+
+    @safe('title update')
     def _update_title_right(self) -> None:
         tv        = self.theme_variables
         c_success = tc(tv, 'text-success', 'green')
@@ -306,10 +320,13 @@ class SpeekMax(App[None]):
         timeout   = getattr(self, '_ev_timeout',   0)
         completed = getattr(self, '_ev_completed', 0)
         unread    = getattr(self, '_unread',  0)
+        oom       = getattr(self, '_oom_count',    0)
         if running:
             parts.append(f'[bold {c_success}]▶ {running}[/]')
         if pending:
             parts.append(f'[bold {c_warning}]⏸ {pending}[/]')
+        if oom:
+            parts.append(f'[bold {c_error}]☠ {oom} OOM[/]')
         if failed:
             parts.append(f'[bold {c_error}]✗ {failed}F[/]')
         if timeout:
@@ -335,6 +352,14 @@ class SpeekMax(App[None]):
     def on_my_jobs_widget_running_count(self, event: MyJobsWidget.RunningCount) -> None:
         self._running = event.running
         self._pending = event.pending
+        self._update_title_right()
+
+    def on_my_jobs_widget_oom_count(self, event: MyJobsWidget.OomCount) -> None:
+        self._oom_count = max(getattr(self, '_oom_count', 0), event.count)
+        self._update_title_right()
+
+    def on_history_widget_oom_count(self, event: HistoryWidget.OomCount) -> None:
+        self._oom_count = max(getattr(self, '_oom_count', 0), event.count)
         self._update_title_right()
 
     def on_my_jobs_widget_cancel_requested(
@@ -370,9 +395,15 @@ class SpeekMax(App[None]):
     # MyJobs and History handle their own JobInfoModal popups directly —
     # no app-level handlers needed.
 
+    def action_restart(self) -> None:
+        """Restart the app by re-executing the same process."""
+        import sys
+        self.exit()
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description='speek-max: SLURM TUI')
+    parser = argparse.ArgumentParser(description='speek+: SLURM TUI')
     parser.add_argument('--theme', '-t', default=DEFAULT_THEME, choices=THEME_NAMES)
     parser.add_argument('--user', '-u', default=getpass.getuser())
     args = parser.parse_args()

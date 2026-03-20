@@ -22,7 +22,7 @@ from textual.widgets import (
 )
 
 from speek.speek_max.slurm import fetch_history
-from speek.speek_max._utils import tc
+from speek.speek_max._utils import tc, safe
 from speek.speek_max.widgets.datatable import SpeekDataTable
 
 # ── Persistence ────────────────────────────────────────────────────────────────
@@ -104,23 +104,18 @@ _IND_KEY_PREFIX = 'ind::'
 _HISTORY_TC = '#history-tc'
 
 # (upper age bound in seconds, display label)
-def _time_zone_label(zone_idx: int) -> str:
-    """Generate divider label with actual date/time range."""
+def _time_zone_parts(zone_idx: int) -> tuple:
+    """Return (age_label, date_str) for a divider row."""
     from datetime import timedelta
     now = datetime.now()
     bounds = [3600, 86400, 3*86400, 7*86400, float('inf')]
-    names = ['< 1h', '1h – 24h', '1d – 3d', '3d – 7d', '> 7d']
-    label = names[min(zone_idx, len(names)-1)]
-    # Add actual date
-    if zone_idx == 0:
-        return f'{label}  ({now.strftime("%H:%M")}–now)'
-    start_secs = bounds[zone_idx - 1] if zone_idx > 0 else 0
-    end_secs = bounds[zone_idx] if zone_idx < len(bounds) else float('inf')
-    start_dt = now - timedelta(seconds=end_secs) if end_secs != float('inf') else None
-    end_dt = now - timedelta(seconds=start_secs)
-    if start_dt:
-        return f'{label}  ({start_dt.strftime("%m/%d")}–{end_dt.strftime("%m/%d")})'
-    return f'{label}  (before {end_dt.strftime("%m/%d")})'
+    labels = ['1h', '1d', '3d', '7d', '7d+']
+    age = labels[min(zone_idx, len(labels)-1)]
+    if zone_idx >= 1:
+        secs = bounds[zone_idx]
+        dt = now - timedelta(seconds=secs) if secs != float('inf') else now - timedelta(seconds=bounds[zone_idx - 1])
+        return age, dt.strftime('%y-%m-%d')
+    return age, now.strftime('%H:%M')
 
 _TIME_ZONE_BOUNDS = [
     (3600,         '< 1h'),
@@ -146,10 +141,18 @@ def _time_zone_idx(start_str: str) -> int:
     return len(_TIME_ZONE_BOUNDS) - 1
 
 
-def _divider_row(label: str, n_cols: int = 9, style: str = 'dim italic') -> tuple:
-    """Return a tuple of Text cells for a time-divider separator row."""
-    ruler = Text(f'── {label} ', style=style)
-    return (ruler,) + tuple(Text('') for _ in range(n_cols - 1))
+_HISTORY_COL_WIDTHS = [3, 3, 2, 12, 6, 5, 7, 7, 8]
+
+def _divider_row(age: str, date: str, n_cols: int = 9) -> tuple:
+    """Return a tuple of Text cells for a time-divider separator row.
+
+    age goes in the Ago column (1), date goes in Name column (3).
+    """
+    s = 'bold'
+    cells = [Text('') for _ in range(n_cols)]
+    cells[1] = Text(age, style=s)
+    cells[3] = Text(f'▎{date}', style=s)
+    return tuple(cells)
 
 
 def _parse_gpu(alloc_tres: str) -> str:
@@ -182,7 +185,7 @@ _TYPE_BADGE: Dict[str, Tuple[str, str, str]] = {
 
 # (col_header, width) — order matches _setup_dt and _populate_dt
 _COL_WIDTHS: Dict[str, int] = {
-    'ago': 4, 'name': 18, 'gpu': 12, 'nodes': 10, 'count': 4, 'state': 12, 'elapsed': 9, 'ids': 18,
+    'ago': 3, 'name': 12, 'gpu': 6, 'nodes': 5, 'count': 2, 'state': 7, 'elapsed': 7, 'ids': 8,
 }
 _N_HISTORY_COLS = 9  # E + Ago + # + Name + GPU + Nodes + State + Elapsed + IDs
 
@@ -343,14 +346,14 @@ class FullHistoryModal(SpeekModal):
         dt = self.query_one('#fh-dt', SpeekDataTable)
         dt.zebra_stripes = True
         dt.add_column('E',       width=3)
-        dt.add_column('Ago',     width=4)
-        dt.add_column('#',       width=4)
-        dt.add_column('Name',    width=22)
-        dt.add_column('GPU',     width=12)
-        dt.add_column('Nodes',   width=10)
-        dt.add_column('State',   width=12)
-        dt.add_column('Elapsed', width=9)
-        dt.add_column('IDs',     width=18)
+        dt.add_column('Ago',     width=3)
+        dt.add_column('#',       width=2)
+        dt.add_column('Name',    width=12)
+        dt.add_column('GPU',     width=6)
+        dt.add_column('Nodes',   width=5)
+        dt.add_column('State',   width=7)
+        dt.add_column('Elapsed', width=7)
+        dt.add_column('IDs',     width=8)
         tv = self.app.theme_variables
         c_muted     = tc(tv, 'text-muted',     'bright_black')
         c_secondary = tc(tv, 'text-secondary', 'default')
@@ -360,9 +363,11 @@ class FullHistoryModal(SpeekModal):
         for g in self._groups:
             zone = _time_zone_idx(g['start'])
             if zone != current_zone:
+                if current_zone >= 0:  # spacer before divider (skip first)
+                    dt.add_row(*[Text('') for _ in range(_N_HISTORY_COLS)], key=f'{_DIV_KEY_PREFIX}{div_counter}_sp')
                 current_zone = zone
-                label = _time_zone_label(zone)
-                dt.add_row(*_divider_row(label, _N_HISTORY_COLS), key=f'{_DIV_KEY_PREFIX}{div_counter}')
+                _age, _date = _time_zone_parts(zone)
+                dt.add_row(*_divider_row(_age, _date, _N_HISTORY_COLS), key=f'{_DIV_KEY_PREFIX}{div_counter}')
                 div_counter += 1
             time_mode = getattr(self.app, '_time_format', 'relative')
             row = self._build_row(g, state_style, c_muted, c_secondary, tv, time_mode=time_mode)
@@ -379,15 +384,15 @@ class HistoryWidget(Widget):
         Binding('enter', 'view_log',    'Details',  show=False),
         Binding('l',     'view_log',    'Details',  show=False),
         Binding('R',     'relaunch',    'Relaunch', show=True),
-        Binding('1',     'tab_unread',  'Unread',   show=False),
-        Binding('2',     'tab_read',    'Read',     show=False),
-        Binding('3',     'tab_all',     'All',      show=False),
-        Binding('v',     'expand_group', '▶/▼',     show=True),
-        Binding('V',     'fold_all',    '▶▶ All',  show=True),
-        Binding('S',     'toggle_all_read', '☐☐ All', show=True),
-        Binding('space', 'toggle_read', '☐/☑',      show=True),
-        Binding('A',     'mark_all',    'Mark all', show=True),
-        Binding('a',     'full_history','All hist', show=True),
+        Binding('1',     'tab_unread',  '',         show=False),
+        Binding('2',     'tab_read',    '',         show=False),
+        Binding('3',     'tab_all',     '',         show=False),
+        Binding('v',     'expand_group', '',        show=False),
+        Binding('V',     'fold_all',    '',         show=False),
+        Binding('S',     'toggle_all_read', 'Read all', show=True),
+        Binding('space', 'toggle_read', '☐/☑',     show=False),
+        Binding('A',     'mark_all',    '',         show=False),
+        Binding('a',     'full_history','',         show=False),
         Binding('r',     'refresh',     'Refresh',  show=True),
     ]
 
@@ -405,6 +410,8 @@ class HistoryWidget(Widget):
         self._first_to_all: Dict[str, List[str]] = {}
         self._jid_to_row: Dict[str, Tuple]     = {}
         self._expanded_groups: set[str]        = set()
+        self._oom_jobs: set[str]              = set()  # jids with OOM in logs
+        self._oom_notified: set[str]          = set()
         # fresh_jids: job_id → monotonic timestamp when it became fresh
         self._fresh_jids: Dict[str, float]     = {}
         self._startup_wall: float              = 0.0  # wall-clock at startup
@@ -482,6 +489,11 @@ class HistoryWidget(Widget):
             self.timeout   = timeout
             self.completed = completed
 
+    class OomCount(Message):
+        def __init__(self, count: int) -> None:
+            super().__init__()
+            self.count = count
+
     def compose(self) -> ComposeResult:
         """Compose the history widget."""
         with Vertical(id='history-outer'):
@@ -494,13 +506,13 @@ class HistoryWidget(Widget):
                 yield Button('↺', id='collect-btn', variant='default')
             yield LoadingIndicator()
             with TabbedContent(id='history-tc', initial='tc-unread'):
-                with TabPane('Unread [1]', id='tc-unread'):
+                with TabPane('1 Unread', id='tc-unread'):
                     yield SpeekDataTable(id='dt-unread', cursor_type='row', show_cursor=True)
                     yield Static('', id='stats-unread', classes='history-stats')
-                with TabPane('Read [2]', id='tc-read'):
+                with TabPane('2 Read', id='tc-read'):
                     yield SpeekDataTable(id='dt-read', cursor_type='row', show_cursor=True)
                     yield Static('', id='stats-read', classes='history-stats')
-                with TabPane('All [3]', id='tc-all'):
+                with TabPane('3 All', id='tc-all'):
                     yield SpeekDataTable(id='dt-all', cursor_type='row', show_cursor=True)
                     yield Static('', id='stats-all', classes='history-stats')
 
@@ -534,14 +546,14 @@ class HistoryWidget(Widget):
     def _setup_dt(self, dt: SpeekDataTable) -> None:
         dt.zebra_stripes = True
         dt.add_column('E',       width=3)
-        dt.add_column('Ago',     width=4)
-        dt.add_column('#',       width=4)
-        dt.add_column('Name',    width=18)
-        dt.add_column('GPU',     width=12)
-        dt.add_column('Nodes',   width=10)
-        dt.add_column('State',   width=12)
-        dt.add_column('Elapsed', width=9)
-        dt.add_column('IDs',     width=18)
+        dt.add_column('Ago',     width=3)
+        dt.add_column('#',       width=2)
+        dt.add_column('Name',    width=12)
+        dt.add_column('GPU',     width=6)
+        dt.add_column('Nodes',   width=5)
+        dt.add_column('State',   width=7)
+        dt.add_column('Elapsed', width=7)
+        dt.add_column('IDs',     width=8)
 
     def watch_lookback_days(self, _old: int, _new: int) -> None:
         self._update_scope_label()
@@ -595,6 +607,50 @@ class HistoryWidget(Widget):
             self._expanded_groups &= set(self._first_to_all.keys())
             self.query_one(LoadingIndicator).display = False
             self._refresh_all_tables()
+            # Scan for OOM in completed/running jobs
+            self._scan_oom()
+        if event.worker.group == 'oom-scan' and event.state == WorkerState.SUCCESS:
+            new_oom = (event.worker.result or set()) - self._oom_jobs
+            self._oom_jobs |= (event.worker.result or set())
+            if new_oom:
+                # Mark OOM groups as unread + fresh so they surface as new events
+                import time as _t
+                now_mono = _t.monotonic()
+                for g in self._all_groups:
+                    if any(jid in new_oom for jid in g['ids']):
+                        # Remove from read so it appears in Unread tab
+                        for jid in g['ids']:
+                            self._read_ids.discard(jid)
+                        # Mark fresh so it blinks
+                        self._fresh_jids[g['first_jid']] = now_mono
+                self.post_message(self.OomCount(len(self._oom_jobs)))
+                self._refresh_all_tables()
+
+    def _scan_oom(self) -> None:
+        """Kick off a background worker to scan recent job logs for OOM."""
+        # Collect jids of COMPLETED/RUNNING groups not yet scanned
+        candidates = []
+        for g in self._all_groups:
+            if g['state'] in ('COMPLETED', 'RUNNING'):
+                for jid in g['ids']:
+                    if jid not in self._oom_jobs and jid not in self._oom_notified:
+                        candidates.append(jid)
+        if not candidates:
+            return
+        # Limit to most recent 30 to keep it fast
+        candidates = candidates[:30]
+
+        def _worker():
+            from speek.speek_max.slurm import get_job_log_path
+            from speek.speek_max.log_scan import detect_oom
+            oom_found: set[str] = set()
+            for jid in candidates:
+                path = get_job_log_path(jid)
+                if path and detect_oom(path):
+                    oom_found.add(jid)
+            return oom_found
+
+        self.run_worker(_worker, thread=True, group='oom-scan')
 
     def _active_dt(self) -> SpeekDataTable:
         tc_widget = self.query_one(_HISTORY_TC, TabbedContent)
@@ -627,6 +683,7 @@ class HistoryWidget(Widget):
             'PENDING':       c_warning,
         }
 
+    @safe('Events refresh')
     def _refresh_all_tables(self) -> None:
         for tab, dt_id in _DT_IDS.items():
             dt    = self.query_one(f'#{dt_id}', SpeekDataTable)
@@ -634,6 +691,9 @@ class HistoryWidget(Widget):
             groups = self._filtered_groups(tab)
             self._populate_dt(dt, groups)
             stats.update(self._stats_text(groups, tab))
+            empty = len(groups) == 0
+            dt.display = not empty
+            stats.set_class(empty, 'history-empty')
         self._update_title()
 
     def _update_title(self) -> None:
@@ -665,6 +725,7 @@ class HistoryWidget(Widget):
                     row_data, state_style, c_muted, c_secondary, tv, time_mode)
                 dt.add_row(*ind, key=f'{_IND_KEY_PREFIX}{jid}')
 
+    @safe('Events populate')
     def _populate_dt(self, dt: SpeekDataTable, groups: List[dict]) -> None:
         tv          = self.app.theme_variables
         c_muted     = tc(tv, 'text-muted',     'bright_black')
@@ -687,9 +748,11 @@ class HistoryWidget(Widget):
             for g in groups:
                 zone = _time_zone_idx(g['start'])
                 if zone != current_zone:
+                    if current_zone >= 0:
+                        dt.add_row(*[Text('') for _ in range(_N_HISTORY_COLS)], key=f'{_DIV_KEY_PREFIX}{div_counter}_sp')
                     current_zone = zone
-                    label = _time_zone_label(zone)
-                    dt.add_row(*_divider_row(label, _N_HISTORY_COLS),
+                    _age, _date = _time_zone_parts(zone)
+                    dt.add_row(*_divider_row(_age, _date, _N_HISTORY_COLS),
                                key=f'{_DIV_KEY_PREFIX}{div_counter}')
                     div_counter += 1
                 expanded = g['first_jid'] in self._expanded_groups
@@ -712,10 +775,7 @@ class HistoryWidget(Widget):
     ) -> tuple:
         """Build a single DataTable row tuple for group g."""
         unread = self._group_is_unread(g)
-        fid = g['first_jid']
         _time_mode = time_mode
-
-        intensity = self._fresh_intensity(fid)
 
         def _cell(content: str, w: int, style: str = '') -> Text:
             return Text(content[:w], style=style)
@@ -724,31 +784,36 @@ class HistoryWidget(Widget):
         name_style    = 'bold' if unread else c_muted
         n             = len(g['ids'])
         if expanded:
-            fold_icon = '▼'
+            fold = '▼'
         elif n > 1:
-            fold_icon = '▶'
+            fold = '▶'
         else:
-            fold_icon = ' '
-        count_str     = f'{fold_icon}{n}'
+            fold = ''
+        count_str     = str(n)
+        disp_name     = f'{fold} {g["disp_name"]}' if fold else g['disp_name']
         elapsed_style = (f'bold {state_style.get(g["state"], c_muted)}'
                          if g['state'] in _TERMINAL else c_muted)
         gpu_label = _fmt_gpu(g['gpu_models']) or g['part']
 
-        # Fresh indicator: red dot prepended to the badge for recent events
-        badge = _type_badge(g['state'], tv)
-        if intensity > 0:
-            bright = int(150 + intensity * 105)  # 150–255
-            dot = Text('● ', style=f'bold #{bright:02x}3030')
-            badge = dot + badge
+        has_oom = any(jid in self._oom_jobs for jid in g['ids'])
+        if has_oom:
+            c_error = tc(tv, 'text-error', 'red')
+            bg = tc(tv, 'error', 'red')
+            fg = tc(tv, 'background', 'black')
+            badge = Text(' ☠ ', style=f'bold {fg} on {bg}')
+            state_cell = _cell('OOM', _COL_WIDTHS['state'], f'bold {c_error}')
+        else:
+            badge = _type_badge(g['state'], tv)
+            state_cell = _cell(g['state'], _COL_WIDTHS['state'], state_style.get(g['state'], 'default'))
 
         return (
             badge,
             _cell(_rel_time(g['start'], _time_mode),  _COL_WIDTHS['ago'],     c_secondary),
             _cell(count_str,              _COL_WIDTHS['count'],   f'bold {c_muted}'),
-            _cell(g['disp_name'],         _COL_WIDTHS['name'],    name_style),
+            _cell(disp_name,              _COL_WIDTHS['name'],    name_style),
             _cell(gpu_label,              _COL_WIDTHS['gpu'],     c_secondary),
             _cell(_fmt_nodes(g['nodes']), _COL_WIDTHS['nodes'],   c_secondary),
-            _cell(g['state'],             _COL_WIDTHS['state'],   state_style.get(g['state'], 'default')),
+            state_cell,
             _cell(g['elapsed'],           _COL_WIDTHS['elapsed'], elapsed_style),
             _cell(_fmt_ids(g['ids']),     _COL_WIDTHS['ids'],     c_muted),
         )
@@ -790,8 +855,8 @@ class HistoryWidget(Widget):
             total_jobs += len(g['ids'])
 
         if not groups:
-            label = {'unread': 'unread', 'read': 'read', 'all': f'last {self.lookback_days}d'}
-            return Text(f'No {label.get(tab, tab)} jobs', style=c_muted)
+            label = {'unread': 'no unread events', 'read': 'no read events', 'all': f'no events in last {self.lookback_days}d'}
+            return Text(label.get(tab, 'no events'))
 
         t = Text()
         ordered = [
@@ -820,6 +885,10 @@ class HistoryWidget(Widget):
         n_groups = len(groups)
         t.append(f'  ({n_groups} group{"s" if n_groups != 1 else ""}, {total_jobs} job{"s" if total_jobs != 1 else ""})',
                  style=c_muted)
+        n_oom = len(self._oom_jobs)
+        if n_oom:
+            t.append('  ')
+            t.append(f'☠ {n_oom} OOM', style=f'bold {c_error}')
         return t
 
     def _selected_first_jid(self) -> Optional[str]:
@@ -920,7 +989,7 @@ class HistoryWidget(Widget):
                     self._read_ids.add(jid)
         _save_read_ids(self._read_ids, getattr(self.app, '_max_read_ids', 2000))
         self._refresh_all_tables()
-        self._post_counts()
+        self._update_title()
 
     def action_expand_group(self) -> None:
         key = self._selected_raw_key()

@@ -32,9 +32,9 @@ dependencies = [
 ]
 
 [project.scripts]
-speek     = "speek.speek_classic:main"
-speek-min = "speek.speek_min:main"
-speek-max = "speek.speek_max.app:main"
+"speek0"  = "speek.speek_classic:main"
+"speek-"  = "speek.speek_min:main"
+"speek+"  = "speek.speek_max.app:main"
 
 [project.urls]
 Repository = "https://github.com/edong6768/speek.git"

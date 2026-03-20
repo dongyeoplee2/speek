@@ -27,6 +27,14 @@ _ERROR_RE = re.compile(
     re.IGNORECASE,
 )
 
+_OOM_RE = re.compile(
+    r'(?:out of memory|CUDA out of memory|OutOfMemoryError|'
+    r'torch\.cuda\.OutOfMemoryError|CUDA error: out of memory|'
+    r'oom-kill|Cannot allocate memory|OOM|'
+    r'Killed|SIGKILL)',
+    re.IGNORECASE,
+)
+
 _WARN_RE = re.compile(
     r'(?:warning|warn:|UserWarning|DeprecationWarning)',
     re.IGNORECASE,
@@ -126,5 +134,52 @@ def extract_hint(log_path: str) -> Optional[str]:
                 snip = ln.strip()[:40]
                 return snip
         return None
+    except Exception:
+        return None
+
+
+# Cache: (path, file_size) → result (str or None)
+# Once OOM is found (truthy), it stays cached permanently for that path.
+# None results are re-checked when file grows.
+_oom_cache: dict[str, tuple[int, Optional[str]]] = {}
+
+
+def detect_oom(log_path: str, tail_lines: int = 200) -> Optional[str]:
+    """Scan the last *tail_lines* of a log for OOM signals.
+
+    Returns a short description if OOM is detected, None otherwise.
+    Results are cached by (path, size) — a truthy result is permanent,
+    a None result is re-checked when the file grows.
+    """
+    try:
+        p = Path(log_path)
+        if not p.exists():
+            return None
+        size = p.stat().st_size
+        if size == 0:
+            return None
+        # Check cache
+        cached = _oom_cache.get(log_path)
+        if cached is not None:
+            cached_size, cached_result = cached
+            if cached_result is not None:
+                return cached_result  # OOM found before — permanent
+            if cached_size == size:
+                return None  # file unchanged, still no OOM
+        # Scan tail
+        chunk = min(size, tail_lines * 200)
+        with open(p, 'r', errors='replace') as f:
+            if size > chunk:
+                f.seek(size - chunk)
+                f.readline()
+            lines = f.readlines()[-tail_lines:]
+        result = None
+        for ln in lines:
+            m = _OOM_RE.search(ln)
+            if m:
+                result = ln.strip()[:60]
+                break
+        _oom_cache[log_path] = (size, result)
+        return result
     except Exception:
         return None

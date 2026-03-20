@@ -76,12 +76,14 @@ _MODEL_ALIASES: Dict[str, str] = {
 _MODEL_VRAM: Dict[str, int] = {
     'H200':      141,
     'H100':       80,
+    'A100':       80,
     'A100-80GB':  80,
     'A100-40GB':  40,
     '4A100':      40,
     'L40S':       48,
     'L40':        48,
     'A6000':      48,
+    'PRO6000':    48,
     'A5000':      24,
     '3090':       24,
     '4090':       24,
@@ -124,7 +126,10 @@ def fetch_cluster_stats() -> Dict[str, Dict]:
     except Exception:
         return {}
 
-    agg: Dict[str, Dict] = defaultdict(lambda: {'Total': 0, 'Used': 0, 'Nodes': []})
+    agg: Dict[str, Dict] = defaultdict(lambda: {
+        'Total': 0, 'Used': 0, 'Nodes': [],
+        '_cpu_total': 0, '_mem_total': 0, '_node_count': 0,
+    })
 
     for ln in out.splitlines():
         if not ln.strip():
@@ -169,10 +174,25 @@ def fetch_cluster_stats() -> Dict[str, Dict]:
 
         state = _field('State').split('+')[0].rstrip('*~#$').upper()
 
+        # CPU and memory per node
+        cpu_total = 0
+        mem_mb = 0
+        try:
+            cpu_total = int(_field('CPUTot') or 0)
+        except ValueError:
+            pass
+        try:
+            mem_mb = int(_field('RealMemory') or 0)
+        except ValueError:
+            pass
+
         used = min(used, total)
         agg[model]['Total'] += total
         agg[model]['Used']  += used
         agg[model]['Nodes'].append((node, state))
+        agg[model]['_cpu_total'] += cpu_total
+        agg[model]['_mem_total'] += mem_mb
+        agg[model]['_node_count'] += 1
 
     result: Dict[str, Dict] = {}
     for m, d in agg.items():
@@ -181,11 +201,16 @@ def fetch_cluster_stats() -> Dict[str, Dict]:
             mv = re.search(r'(\d+)GB', m, re.IGNORECASE)
             if mv:
                 vram = int(mv.group(1))
+        n_gpus = d['Total'] or 1
+        cpu_per_gpu = d['_cpu_total'] // n_gpus if d['_cpu_total'] else None
+        ram_per_gpu = d['_mem_total'] // n_gpus // 1024 if d['_mem_total'] else None  # GB
         result[m] = {
             'Total': d['Total'],
             'Used':  d['Used'],
             'Free':  d['Total'] - d['Used'],
             'VRAM':  vram,
+            'CPUperGPU': cpu_per_gpu,
+            'RAMperGPU': ram_per_gpu,
             'Nodes': sorted(d['Nodes'], key=lambda x: x[0]),
         }
     with _cluster_stats_lock:
@@ -266,7 +291,7 @@ def fetch_job_stats() -> Dict:
             return _job_stats_cache[1]
     try:
         out = subprocess.check_output(
-            ['squeue', '-o', '%T|%u|%b', '-h',
+            ['squeue', '-o', '%T|%u|%P|%b', '-h',
              '--states=RUNNING,PENDING'],
             text=True, stderr=subprocess.DEVNULL,
         )
@@ -280,15 +305,18 @@ def fetch_job_stats() -> Dict:
     for ln in out.splitlines():
         if not ln.strip():
             continue
-        parts = (ln.split('|') + ['', '', ''])[:3]
-        state, user, gres = parts[0].strip(), parts[1].strip(), parts[2].strip()
+        parts = (ln.split('|') + ['', '', '', ''])[:4]
+        state, user, partition, gres = (
+            parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+        )
 
         mt = GPU_RE_NAMED.search(gres)
         if mt:
             model = _norm(mt.group(1))
         else:
             flex = FLEX_RE.search(gres)
-            model = 'GPU' if flex else None
+            # Use partition name as model fallback
+            model = partition if (flex and partition) else ('GPU' if flex else None)
 
         if not model:
             continue

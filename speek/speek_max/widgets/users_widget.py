@@ -71,16 +71,16 @@ class UsersWidget(Widget):
     def on_mount(self) -> None:
         dt = self.query_one(SpeekDataTable)
         dt.zebra_stripes = True
-        dt.add_column('User',      width=14)
-        dt.add_column('Now GPU',   width=8)
-        dt.add_column('Pending',   width=8)
-        dt.add_column('Jobs',      width=6)
-        dt.add_column('GPU-hrs',   width=8)
-        dt.add_column('Success%',  width=9)
-        dt.add_column('Fail',      width=5)
-        dt.add_column('Avg dur',   width=8)
-        dt.add_column('FairShare', width=10)
-        dt.add_column('Partition', width=10)
+        dt.add_column('User',      width=8)
+        dt.add_column('GPU',      width=4)
+        dt.add_column('PD',       width=3)
+        dt.add_column('Jobs',      width=4)
+        dt.add_column('GPU·h',    width=6)
+        dt.add_column('OK%',      width=4)
+        dt.add_column('Fail',      width=4)
+        dt.add_column('Avg',      width=6)
+        dt.add_column('Fair',     width=5)
+        dt.add_column('Part',     width=6)
         self._update_toolbar()
 
     def on_show(self) -> None:

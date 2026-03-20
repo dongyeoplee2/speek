@@ -209,7 +209,6 @@ class JobInfoModal(SpeekModal):
         Binding('1',        'show_detail',    'Detail',   show=True),
         Binding('2',        'show_output',    'Output',   show=True),
         Binding('3',        'show_gpu',       'GPU',      show=True),
-        Binding('4',        'show_priority',  'Analysis', show=True),
         Binding('g',        'fetch_gpu',      '⚡ Fetch',  show=True),
         Binding('r',        'refresh',        'Refresh',  show=True),
         Binding('l,right',  'next_job',       '→ Next',   show=True),
@@ -244,7 +243,17 @@ class JobInfoModal(SpeekModal):
     #ji-detail-pane {
         height: 1fr;
         background: transparent;
+    }
+    #ji-detail-scroll {
+        width: 1fr;
+        height: 1fr;
         padding: 1 2;
+    }
+    #ji-analysis-scroll {
+        width: 1fr;
+        height: 1fr;
+        padding: 1 2;
+        border-left: tall $panel;
     }
     #ji-detail {
         height: auto;
@@ -315,11 +324,6 @@ class JobInfoModal(SpeekModal):
         padding: 0 1;
         background: transparent;
     }
-    #ji-priority-pane {
-        height: 1fr;
-        background: transparent;
-        padding: 1 2;
-    }
     #ji-priority-content {
         height: auto;
         width: 1fr;
@@ -358,8 +362,11 @@ class JobInfoModal(SpeekModal):
         with Vertical(id='ji-body', classes='speek-popup'):
             with Horizontal(id='ji-main'):
                 with ContentSwitcher(id='ji-switcher', initial=_DETAIL_PANE):
-                    with VerticalScroll(id=_DETAIL_PANE):
-                        yield Static(id='ji-detail')
+                    with Horizontal(id=_DETAIL_PANE):
+                        with VerticalScroll(id='ji-detail-scroll'):
+                            yield Static(id='ji-detail')
+                        with VerticalScroll(id='ji-analysis-scroll'):
+                            yield Static(id='ji-priority-content')
                     with Vertical(id=_OUTPUT_PANE):
                         yield Static(self._log_path, id='ji-log-path')
                         yield RichLog(id='ji-log', highlight=False, markup=False, wrap=False)
@@ -370,13 +377,10 @@ class JobInfoModal(SpeekModal):
                         with VerticalScroll(id='ji-gpu-scroll'):
                             yield Static('Press [bold]g[/bold] to fetch live GPU stats.',
                                          id='ji-gpu-result', markup=True)
-                    with VerticalScroll(id=_PRIORITY_PANE):
-                        yield Static(id='ji-priority-content')
                 with Vertical(id='ji-tab-sidebar'):
                     yield Static('1\nDetail',   id='ji-tab-btn-detail',   classes='ji-tab-btn')
                     yield Static('2\nOutput',   id='ji-tab-btn-output',   classes='ji-tab-btn')
                     yield Static('3\nGPU',      id='ji-tab-btn-gpu',      classes='ji-tab-btn')
-                    yield Static('4\nAnalysis', id='ji-tab-btn-priority', classes='ji-tab-btn')
             yield Static('', id='ji-hint', markup=True)
 
     def on_mount(self) -> None:
@@ -413,20 +417,22 @@ class JobInfoModal(SpeekModal):
     def _update_hint(self) -> None:
         n   = len(self._job_ids)
         nav = '[bold]h/l[/] job  ' if n > 1 else ''
-        hint = (f'{nav}[bold]j/k[/] scroll  [bold]1/2/3/4[/] pane  '
+        hint = (f'{nav}[bold]j/k[/] scroll  [bold]1/2/3[/] pane  '
                 '[bold]g[/] fetch GPU  [bold]r[/] refresh  [bold]⇥[/] switch  [bold]q[/] close')
         self.query_one('#ji-hint', Static).update(hint)
 
     # ── Tab helpers ────────────────────────────────────────────────────────────
 
-    _PANE_CYCLE = (_DETAIL_PANE, _OUTPUT_PANE, _GPU_PANE, _PRIORITY_PANE)
+    _PANE_CYCLE = (_DETAIL_PANE, _OUTPUT_PANE, _GPU_PANE)
 
     def _set_active_tab(self, pane_id: str) -> None:
+        # Map old pane id to detail if someone passes priority
+        if pane_id == _PRIORITY_PANE:
+            pane_id = _DETAIL_PANE
         self.query_one('#ji-switcher', ContentSwitcher).current = pane_id
         self.query_one('#ji-tab-btn-detail').set_class(pane_id == _DETAIL_PANE,   '--active')
         self.query_one('#ji-tab-btn-output').set_class(pane_id == _OUTPUT_PANE,   '--active')
         self.query_one('#ji-tab-btn-gpu').set_class(pane_id == _GPU_PANE,         '--active')
-        self.query_one('#ji-tab-btn-priority').set_class(pane_id == _PRIORITY_PANE, '--active')
 
     def _active_pane(self) -> str:
         return self.query_one('#ji-switcher', ContentSwitcher).current or _DETAIL_PANE
@@ -446,7 +452,7 @@ class JobInfoModal(SpeekModal):
         self._set_active_tab(_GPU_PANE)
 
     def action_show_priority(self) -> None:
-        self._set_active_tab(_PRIORITY_PANE)
+        self._set_active_tab(_DETAIL_PANE)
 
     # ── Sidebar click ─────────────────────────────────────────────────────────
 
@@ -454,7 +460,6 @@ class JobInfoModal(SpeekModal):
         'ji-tab-btn-detail':   _DETAIL_PANE,
         'ji-tab-btn-output':   _OUTPUT_PANE,
         'ji-tab-btn-gpu':      _GPU_PANE,
-        'ji-tab-btn-priority': _PRIORITY_PANE,
     }
 
     def on_click(self, event) -> None:
@@ -658,6 +663,17 @@ class JobInfoModal(SpeekModal):
             result['node'] = details.get('BatchHost', details.get('NodeList', ''))
             result['cpus'] = details.get('NumCPUs', details.get('AllocCPUS', ''))
             result['mem'] = details.get('ReqMem', '')
+            # OOM scan
+            try:
+                from speek.speek_max.slurm import get_job_log_path
+                from speek.speek_max.log_scan import detect_oom
+                path = get_job_log_path(job_id)
+                if path:
+                    oom_msg = detect_oom(path)
+                    if oom_msg:
+                        result['oom_detected'] = oom_msg
+            except Exception:
+                pass
 
         elif state == 'COMPLETED':
             # Summary: duration, efficiency
@@ -665,6 +681,17 @@ class JobInfoModal(SpeekModal):
             result['timelimit'] = details.get('Timelimit', details.get('TimeLimit', ''))
             result['exit_code'] = details.get('ExitCode', '')
             result['node'] = details.get('BatchHost', details.get('NodeList', ''))
+            # OOM scan
+            try:
+                from speek.speek_max.slurm import get_job_log_path
+                from speek.speek_max.log_scan import detect_oom
+                path = get_job_log_path(job_id)
+                if path:
+                    oom_msg = detect_oom(path)
+                    if oom_msg:
+                        result['oom_detected'] = oom_msg
+            except Exception:
+                pass
 
         elif state in ('CANCELLED',):
             result['reason'] = details.get('Reason', '')
@@ -737,6 +764,11 @@ class JobInfoModal(SpeekModal):
                         lines.append(f'  [{c_warning}]{label}:[/]  [{c_error}]{text}[/]')
 
         elif state == 'RUNNING':
+            oom_msg = data.get('oom_detected')
+            if oom_msg:
+                lines.append(f'[bold {c_error}]── ☠ OOM Detected ──[/]')
+                lines.append(f'  [bold {c_error}]{oom_msg}[/]')
+                lines.append('')
             lines.append(f'[bold {c_success}]── Running Status ──[/]')
             elapsed = data.get('elapsed', '')
             timelimit = data.get('timelimit', '')
@@ -750,6 +782,12 @@ class JobInfoModal(SpeekModal):
                 lines.append(f'  [bold]CPUs:[/bold]      {cpus}')
 
         elif state == 'COMPLETED':
+            oom_msg = data.get('oom_detected')
+            if oom_msg:
+                lines.append(f'[bold {c_error}]── ☠ OOM Detected ──[/]')
+                lines.append(f'  [bold {c_error}]{oom_msg}[/]')
+                lines.append(f'  [{c_warning}]Job completed but OOM errors found in log[/]')
+                lines.append('')
             lines.append(f'[bold {c_success}]── Completed ──[/]')
             elapsed = data.get('elapsed', '')
             timelimit = data.get('timelimit', '')

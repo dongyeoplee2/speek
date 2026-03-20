@@ -33,13 +33,13 @@ class NodeWidget(Widget):
     def on_mount(self) -> None:
         dt = self.query_one(SpeekDataTable)
         dt.zebra_stripes = True
-        dt.add_column('Node',      width=12)
-        dt.add_column('Partition', width=12)
-        dt.add_column('GPU Model', width=12)
-        dt.add_column('Free',      width=5)
-        dt.add_column('Total',     width=5)
-        dt.add_column('State',     width=8)
-        dt.add_column('Reason',    width=20)
+        dt.add_column('Node',      width=10)
+        dt.add_column('Partition', width=6)
+        dt.add_column('GPU',       width=8)
+        dt.add_column('Free',      width=4)
+        dt.add_column('Total',     width=4)
+        dt.add_column('State',     width=7)
+        dt.add_column('Reason',    width=12)
 
     def on_show(self) -> None:
         self._load()

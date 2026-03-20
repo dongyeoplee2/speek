@@ -17,7 +17,7 @@ from speek.speek_max.widgets.modal_base import SpeekModal
 from textual.widgets import Button, DataTable, Input, Label, LoadingIndicator, Static, TabbedContent, TabPane
 
 from speek.speek_max.slurm import fetch_all_priorities, fetch_history, fetch_my_jobs, get_job_log_path
-from speek.speek_max._utils import tc
+from speek.speek_max._utils import tc, safe
 from speek.speek_max.widgets.datatable import SpeekDataTable
 
 
@@ -58,10 +58,6 @@ def _hist_zone_idx(start_str: str) -> int:
 _NAME_STRIP_RE = re.compile(r'[_\-]?\d+$')
 _PROJ = 'proj::'
 _IND  = 'ind::'
-_LBL_PROJ_OPEN   = '▼ Project'
-_LBL_PROJ_CLOSED = '▶ Project'
-_LBL_JOBS_OPEN   = '▼ Jobs'
-_LBL_JOBS_CLOSED = '▶ Jobs'
 
 
 def _name_base(name: str) -> str:
@@ -152,8 +148,8 @@ class MyJobsWidget(Widget):
     BINDINGS = [
         Binding('d',     'view_job',    'Details',  show=True),
         Binding('enter', 'view_job',   'Details',  show=False),
-        Binding('v',     'toggle_fold', '▶/▼',     show=True),
-        Binding('V',     'fold_all',   '▶▶ All',  show=True),
+        Binding('v',     'toggle_fold', '▶/▼',     show=False),
+        Binding('V',     'fold_all',   '',         show=False),
         Binding('x',     'cancel_job', 'Cancel',   show=True),
         Binding('1',     'tab_current', '',        show=False),
         Binding('2',     'tab_history', '',        show=False),
@@ -175,6 +171,11 @@ class MyJobsWidget(Widget):
             self.running = running
             self.pending = pending
 
+    class OomCount(Message):
+        def __init__(self, count: int) -> None:
+            super().__init__()
+            self.count = count
+
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def __init__(self, user: str, **kwargs) -> None:
@@ -185,11 +186,11 @@ class MyJobsWidget(Widget):
         """Compose the my-jobs widget."""
         yield LoadingIndicator()
         with TabbedContent(id='myjobs-tc', initial='tc-current'):
-            with TabPane('Current [1]', id='tc-current'):
+            with TabPane('1 Current', id='tc-current'):
                 yield Static('', id='myjobs-empty', classes='empty-state')
                 yield SpeekDataTable(id='myjobs-dt', cursor_type='row', show_cursor=True)
                 yield Static('', id='myjobs-stats')
-            with TabPane('History [2]', id='tc-history'):
+            with TabPane('2 History', id='tc-history'):
                 yield SpeekDataTable(id='myjobs-hist-dt', cursor_type='row', show_cursor=True)
                 yield Static('', id='myjobs-hist-empty', classes='empty-state')
 
@@ -198,34 +199,37 @@ class MyJobsWidget(Widget):
         self._collapsed: set[str] = set()     # collapsed project names
         self._expanded_groups: set[str] = set()  # first_jids of expanded groups
         self._log_hints: Dict[str, str] = {}  # first_jid → last log line
+        self._oom_jobs: set[str] = set()       # jids with OOM detected
+        self._oom_notified: set[str] = set()  # jids already notified
         self._group_ids: Dict[str, List[str]] = {}  # first_jid → all jids in group
         self._job_data: Dict[str, dict] = {}  # jid → individual item dict
         self._last_rows: List[Tuple] = []
         self._last_priorities: Dict = {}
         dt = self.query_one(SpeekDataTable)
         dt.zebra_stripes = True
-        dt.add_column('#',         width=3)
-        dt.add_column('Name',      width=18)
-        dt.add_column('Partition', width=10)
-        dt.add_column('GPU',       width=6)
-        dt.add_column('State',     width=9)
-        dt.add_column('Elapsed',   width=9)
-        dt.add_column('ETA',       width=10)
-        dt.add_column('Rank',      width=7)
-        dt.add_column('IDs',       width=16)
-        self._log_col = dt.add_column('Log', width=32)
+        dt.add_column('#',         width=2)
+        dt.add_column('Name',      width=12)
+        dt.add_column('Part',      width=5)
+        dt.add_column('GPU',       width=3)
+        dt.add_column('State',     width=7)
+        dt.add_column('Elapsed',   width=7)
+        dt.add_column('ETA',       width=5)
+        dt.add_column('Rank',      width=4)
+        dt.add_column('IDs',       width=8)
+        self._log_col = dt.add_column('Log', width=16)
         # History tab
         hdt = self.query_one(_MYHIST_DT, SpeekDataTable)
         hdt.zebra_stripes = True
-        hdt.add_column('#',         width=3)
-        hdt.add_column('Name',      width=18)
-        hdt.add_column('Partition', width=10)
-        hdt.add_column('GPU',       width=6)
-        hdt.add_column('State',     width=9)
-        hdt.add_column('Elapsed',   width=9)
-        hdt.add_column('IDs',       width=16)
+        hdt.add_column('#',         width=2)
+        hdt.add_column('Name',      width=12)
+        hdt.add_column('Part',      width=5)
+        hdt.add_column('GPU',       width=3)
+        hdt.add_column('State',     width=7)
+        hdt.add_column('Elapsed',   width=7)
+        hdt.add_column('IDs',       width=8)
         self._hist_groups: Dict[str, list] = {}
         self._hist_collapsed: set[str] = set()
+        self._hist_first_load: bool = True
         self._hist_row_keys: List[str] = []
         self._last_hist_sig: str = ''
         self._load()
@@ -299,6 +303,7 @@ class MyJobsWidget(Widget):
         return (sig, rows, priorities, projects,
                 part_ranked, part_rank_index, stats_text, n_run, n_pend, colors)
 
+    @safe('MyJobs rebuild')
     def _rebuild_from_last(self) -> None:
         """Force a re-render from cached rows (called by collapse/expand actions)."""
         self._last_myjobs_sig = frozenset()  # invalidate so _update always rebuilds
@@ -332,6 +337,37 @@ class MyJobsWidget(Widget):
             return Text(f'#{rank_pos}/{total}', style=c_warning)
         return Text('—', style=c_muted)
 
+    @staticmethod
+    def _parse_elapsed(s: str) -> int:
+        """Parse elapsed string like '1-02:03:04' or '12:34' to total seconds."""
+        try:
+            days = 0
+            if '-' in s:
+                d, s = s.split('-', 1)
+                days = int(d)
+            parts = s.split(':')
+            if len(parts) == 3:
+                return days * 86400 + int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+            if len(parts) == 2:
+                return days * 86400 + int(parts[0]) * 60 + int(parts[1])
+            return 0
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _fmt_elapsed(secs: int) -> str:
+        """Format seconds to compact elapsed string."""
+        if secs <= 0:
+            return ''
+        d, r = divmod(secs, 86400)
+        h, r = divmod(r, 3600)
+        m, _ = divmod(r, 60)
+        if d:
+            return f'{d}d{h:02d}h'
+        if h:
+            return f'{h}:{m:02d}'
+        return f'{m}m'
+
     def _project_header_row(
         self, proj: str, items: List[dict], collapsed: bool,
         c_muted: str, c_secondary: str, c_success: str, c_warning: str,
@@ -341,6 +377,9 @@ class MyJobsWidget(Widget):
         n_run  = sum(1 for it in items if it['state'] == 'RUNNING')
         n_pend = sum(1 for it in items if it['state'] == 'PENDING')
         n_gpu  = sum(int(it['gpu']) for it in items if it['gpu'].isdigit())
+        # Project elapsed: max elapsed across all jobs
+        max_secs = max((self._parse_elapsed(it.get('elapsed', '')) for it in items), default=0)
+        elapsed_str = self._fmt_elapsed(max_secs)
         state_t = Text()
         if n_run:
             state_t.append(str(n_run), style=f'bold {c_success}')
@@ -354,7 +393,7 @@ class MyJobsWidget(Widget):
             Text('', style=c_muted),
             Text(str(n_gpu) if n_gpu else '', style=f'bold {c_secondary}'),
             state_t,
-            Text('', style=c_muted),
+            Text(elapsed_str, style=c_muted),
             Text('', style=c_muted),
             Text('', style=c_muted),
             Text('', style=c_muted),
@@ -366,7 +405,7 @@ class MyJobsWidget(Widget):
         priorities: Dict, part_ranked: Dict, part_rank_index: Dict,
         new_first_jids: List[str], state_style: Dict, colors: tuple,
     ) -> None:
-        c_muted, c_secondary, c_success, c_warning, _ = colors
+        c_muted, c_secondary, c_success, c_warning, c_error = colors
         collapsed = proj in self._collapsed
         hdr = self._project_header_row(
             proj, items, collapsed, c_muted, c_secondary, c_success, c_warning
@@ -388,17 +427,25 @@ class MyJobsWidget(Widget):
             rank = self._rank_cell(g, priorities, part_ranked,
                                    part_rank_index, c_warning, c_muted)
             hint = self._log_hints.get(first_jid, '')
+            has_oom = any(jid in self._oom_jobs for jid in g['ids'])
+            state_text = Text()
+            if has_oom:
+                state_text.append('⚠', style=f'bold {c_error}')
+                state_text.append(g['state'], style=f'bold {c_error}')
+            else:
+                state_text = Text(g['state'], style=state_style.get(g['state'], f'dim {c_muted}'))
+            hint_style = f'bold {c_error}' if has_oom else c_muted
             dt.add_row(
                 Text(str(count), style=f'bold {c_muted}'),
                 Text(f'  {fold_icon}{g["name"]}', style='default'),
                 Text(g['part'], style=c_secondary),
                 Text(g['gpu'], style='bold'),
-                Text(g['state'], style=state_style.get(g['state'], f'dim {c_muted}')),
+                state_text,
                 Text(g['elapsed'], style=c_muted),
                 Text(g['eta'], style=f'{c_warning} italic') if g['eta'] else Text(''),
                 rank,
                 Text(ids_str, style=c_muted),
-                Text(hint[:32], style=c_muted),
+                Text(hint[:32], style=hint_style),
                 key=first_jid,
             )
             self._row_keys.append(first_jid)
@@ -493,55 +540,53 @@ class MyJobsWidget(Widget):
                 thread=True, group='log-hints',
             )
 
-    def _fetch_log_hints(self, jids: List[str]) -> Dict[str, str]:
-        from speek.speek_max.log_scan import extract_hint
-        results: Dict[str, str] = {}
+    def _fetch_log_hints(self, jids: List[str]) -> Dict:
+        from speek.speek_max.log_scan import extract_hint, detect_oom
+        hints: Dict[str, str] = {}
+        oom_jids: set[str] = set()
         for jid in jids:
             path = get_job_log_path(jid)
-            results[jid] = (extract_hint(path) or '') if path else ''
-        return results
+            if path:
+                hints[jid] = extract_hint(path) or ''
+                # Check for OOM in running jobs
+                oom_msg = detect_oom(path)
+                if oom_msg:
+                    oom_jids.add(jid)
+                    if not hints[jid].startswith('⚠'):
+                        hints[jid] = f'⚠ OOM: {oom_msg[:28]}'
+            else:
+                hints[jid] = ''
+        return {'hints': hints, 'oom': oom_jids}
 
     def on_worker_state_changed(self, event) -> None:
         from textual.worker import WorkerState
         if event.state != WorkerState.SUCCESS:
             return
         if event.worker.group == 'log-hints':
-            self._log_hints.update(event.worker.result or {})
+            result = event.worker.result or {}
+            if isinstance(result, dict) and 'hints' in result:
+                self._log_hints.update(result['hints'])
+                self._oom_jobs |= result.get('oom', set())
+                self.post_message(self.OomCount(len(self._oom_jobs)))
+            else:
+                self._log_hints.update(result)
             self._apply_log_hints()
 
     def _apply_log_hints(self) -> None:
         dt = self.query_one(SpeekDataTable)
         tv = self.app.theme_variables
         c_muted = tc(tv, 'text-muted', 'bright_black')
+        c_error = tc(tv, 'text-error', 'red')
         for jid, hint in self._log_hints.items():
             try:
-                dt.update_cell(jid, self._log_col, Text(hint[:32], style=c_muted))
+                style = f'bold {c_error}' if jid in self._oom_jobs else c_muted
+                dt.update_cell(jid, self._log_col, Text(hint[:32], style=style))
             except Exception:
                 pass
 
-    # ── Binding label updates ──────────────────────────────────────────────────
-
-    def _update_fold_labels(self) -> None:
-        key = self._selected_key()
-        # z: show whether the current project is folded or unfolded
-        if key and key.startswith(_PROJ):
-            proj = key[len(_PROJ):]
-            z_desc = _LBL_PROJ_CLOSED if proj in self._collapsed else _LBL_PROJ_OPEN
-        else:
-            z_desc = _LBL_PROJ_OPEN
-        # v: show whether the current group is expanded or collapsed
-        if key and not key.startswith(_PROJ) and not key.startswith(_IND):
-            has_multi = len(self._group_ids.get(key, [])) > 1
-            v_desc = _LBL_JOBS_OPEN if (has_multi and key in self._expanded_groups) else _LBL_JOBS_CLOSED
-        else:
-            v_desc = _LBL_JOBS_CLOSED
-        self._bindings.bind('z', 'fold_project', z_desc, show=True)
-        self._bindings.bind('v', 'unfold_group', v_desc, show=True)
-        self.refresh_bindings()
-
     @on(DataTable.RowHighlighted)
     def _on_row_highlighted(self, _event: DataTable.RowHighlighted) -> None:
-        self._update_fold_labels()
+        pass
 
     # ── Selection helpers ──────────────────────────────────────────────────────
 
@@ -793,6 +838,7 @@ class MyJobsWidget(Widget):
 
         self.run_worker(_worker, thread=True, exclusive=True, group='myjobs-hist')
 
+    @safe('MyJobs history')
     def _populate_history(self, rows: List[Tuple]) -> None:
         import re as _re
 
@@ -837,12 +883,17 @@ class MyJobsWidget(Widget):
             m = _re.search(r'gres/gpu(?::([^:,]+))?(?::(\d+)|=(\d+))', gpu_str)
             if m:
                 gpu = f'{m.group(1) or "gpu"}:{m.group(2) or m.group(3) or "?"}'
-            # Use name base for project grouping
             proj = _name_base(name) or name
             projects.setdefault(proj, []).append({
                 'jid': jid, 'name': name, 'part': part,
                 'state': state, 'elapsed': elapsed, 'start': start, 'gpu': gpu,
             })
+
+        # On first load, start with all projects folded
+        if self._hist_first_load:
+            self._hist_first_load = False
+            for proj in projects:
+                self._hist_collapsed.add(proj)
 
         self._hist_row_keys = []
         with self.app.batch_update():
@@ -854,18 +905,29 @@ class MyJobsWidget(Widget):
                 # Time divider
                 zone = _hist_zone_idx(items[0]['start'])
                 if zone != current_zone:
+                    if current_zone >= 0:
+                        sp_key = f'{_HIST_DIV_PREFIX}{div_counter}_sp'
+                        dt.add_row(*[Text('') for _ in range(7)], key=sp_key)
+                        self._hist_row_keys.append(sp_key)
                     current_zone = zone
                     from datetime import datetime as _dt, timedelta as _td
                     _now = _dt.now()
                     _bounds = [b for b, _ in _HIST_TIME_ZONES]
-                    _start = _now - _td(seconds=_bounds[zone]) if _bounds[zone] != float('inf') else None
-                    _end = _now - _td(seconds=_bounds[zone-1]) if zone > 0 else _now
-                    base_label = _HIST_TIME_ZONES[zone][1]
-                    if _start:
-                        label = f'{base_label}  ({_start.strftime("%m/%d")}–{_end.strftime("%m/%d")})'
+                    _labels = ['1h', '2h', '6h', '12h', '1d', '3d', '7d', '7d+']
+                    age = _labels[min(zone, len(_labels)-1)]
+                    # Compute date string
+                    if zone >= 5:
+                        secs = _bounds[zone]
+                        date_dt = _now - _td(seconds=secs) if secs != float('inf') else _now - _td(seconds=_bounds[zone-1])
+                        date_str = date_dt.strftime('%y-%m-%d')
+                    elif zone >= 4:
+                        date_str = (_now - _td(seconds=_bounds[zone])).strftime('%y-%m-%d')
                     else:
-                        label = f'{base_label}  (before {_end.strftime("%m/%d")})'
-                    div_cells = [Text(f'── {label} ', style='dim italic')] + [Text('')] * 6
+                        date_str = _now.strftime('%H:%M')
+                    _s = 'bold'
+                    div_cells = [Text('') for _ in range(7)]
+                    div_cells[0] = Text(age, style=_s)
+                    div_cells[1] = Text(f'▎{date_str}', style=_s)
                     key = f'{_HIST_DIV_PREFIX}{div_counter}'
                     dt.add_row(*div_cells, key=key)
                     self._hist_row_keys.append(key)
@@ -896,14 +958,33 @@ class MyJobsWidget(Widget):
                         state_t.append(f'{n_pend}', style=c_warning)
                         state_t.append('P', style=c_muted)
 
+                    # Compute project elapsed: earliest start → latest end
+                    from datetime import datetime as _dt2, timedelta as _td2
+                    earliest = None
+                    latest = None
+                    for it in items:
+                        try:
+                            s = _dt2.strptime(it['start'].replace('T', ' ').split('.')[0], '%Y-%m-%d %H:%M:%S')
+                            e_secs = self._parse_elapsed(it['elapsed'])
+                            end = s + _td2(seconds=e_secs)
+                            if earliest is None or s < earliest:
+                                earliest = s
+                            if latest is None or end > latest:
+                                latest = end
+                        except Exception:
+                            pass
+                    proj_elapsed = ''
+                    if earliest and latest:
+                        proj_elapsed = self._fmt_elapsed(int((latest - earliest).total_seconds()))
+
                     proj_key = f'hproj::{proj}'
                     dt.add_row(
                         Text(str(n), style=f'bold {c_muted}'),
-                        Text(f'{fold} {proj[:16]}', style='bold'),
-                        Text(items[0]['part'][:10], style=c_muted),
+                        Text(f'{fold} {proj[:12]}', style='bold'),
+                        Text(items[0]['part'][:6], style=c_muted),
                         Text('', style=c_muted),
                         state_t,
-                        Text('', style=c_muted),
+                        Text(proj_elapsed, style=c_muted),
                         Text('', style=c_muted),
                         key=proj_key,
                     )
@@ -945,8 +1026,8 @@ class MyJobsWidget(Widget):
                         sg_fold = '▶' if sg_collapsed else '▼'
                         dt.add_row(
                             Text(f' {sg_n}', style=c_muted),
-                            Text(f'{sg_fold} {first["name"][:16]}', style=''),
-                            Text(first['part'][:10], style=c_muted),
+                            Text(f'{sg_fold} {first["name"][:12]}', style=''),
+                            Text(first['part'][:6], style=c_muted),
                             Text(first['gpu'][:6], style=c_muted),
                             sg_state,
                             Text('', style=c_muted),
@@ -961,8 +1042,8 @@ class MyJobsWidget(Widget):
                             ss = state_style.get(item['state'], c_muted)
                             dt.add_row(
                                 Text('', style=c_muted),
-                                Text(f'  {item["name"][:16]}', style=c_muted),
-                                Text(item['part'][:10], style=c_muted),
+                                Text(f'  {item["name"][:12]}', style=c_muted),
+                                Text(item['part'][:6], style=c_muted),
                                 Text(item['gpu'][:6], style=c_muted),
                                 Text(item['state'][:9], style=ss),
                                 Text(item['elapsed'][:9], style=c_muted),
@@ -975,8 +1056,8 @@ class MyJobsWidget(Widget):
                         ss = state_style.get(first['state'], c_muted)
                         dt.add_row(
                             Text('', style=c_muted),
-                            Text(first['name'][:18]),
-                            Text(first['part'][:10], style=c_muted),
+                            Text(first['name'][:14]),
+                            Text(first['part'][:6], style=c_muted),
                             Text(first['gpu'][:6], style=c_muted),
                             Text(first['state'][:9], style=ss),
                             Text(first['elapsed'][:9], style=c_muted),

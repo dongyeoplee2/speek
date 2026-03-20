@@ -8,7 +8,7 @@ from rich.table import Table
 from rich.text import Text
 from textual.widgets import Static
 
-from speek.speek_max.slurm import fetch_cluster_stats, fetch_job_stats, fetch_issue_stats
+from speek.speek_max.slurm import fetch_cluster_stats, fetch_job_stats
 from speek.speek_max._utils import tc
 
 
@@ -99,25 +99,16 @@ def _node_range_text(nodes_states: List[Tuple[str, str]], tv: dict) -> Text:
 
 def _usage_emoji(pct: float) -> str:
     """Same rule as speek/speek-min."""
-    if pct >= 100: return '☠ '
-    if pct > 90:   return '🔥'
-    if pct == 0:   return '🏖 '
-    if pct < 10:   return '❄ '
-    return ''
-
-
-def _trouble_weather(n: int) -> str:
-    """Weather symbol based on trouble count (failed/timeout/OOM jobs)."""
-    if n == 0:   return '☀ '
-    if n <= 3:   return '⛅ '
-    if n <= 10:  return '🌧 '
-    return '⛈ '
+    if pct >= 100: return '💀 '
+    if pct > 90:   return '🔥 '
+    if pct == 0:   return '🏖  '
+    if pct < 10:   return '❄  '
+    return '   '
 
 
 def build_cluster_renderable(
     stats: Dict[str, Dict],
     job_stats: Dict,
-    issue_stats: Dict,
     tv: Dict[str, str],
 ) -> object:
     if not stats:
@@ -157,15 +148,14 @@ def build_cluster_renderable(
     models = sorted(stats, key=lambda m: stats[m]['Total'], reverse=True)
 
     by_model      = (job_stats or {}).get('by_model', {})
-    issue_by_model = (issue_stats or {}).get('by_model', {})
 
     table = Table(box=None, padding=(0, 0), show_header=False, expand=True)
-    table.add_column('model',   no_wrap=True)
-    table.add_column('emoji',   width=2,  no_wrap=True)
+    table.add_column('model',   no_wrap=True, min_width=8)
+    table.add_column('vram',    no_wrap=True, width=5)
+    table.add_column('emoji',   width=3,  no_wrap=True)
     table.add_column('bar',     no_wrap=True, min_width=20)
     table.add_column('counts',  no_wrap=True)
     table.add_column('demand',  no_wrap=True)
-    table.add_column('weather', no_wrap=True)
     table.add_column('n_count', no_wrap=True)
     table.add_column('nodes',   no_wrap=True, min_width=8, max_width=30)
 
@@ -181,11 +171,9 @@ def build_cluster_renderable(
         emoji = _usage_emoji(pct_100)
 
         vram = d.get('VRAM')
-        vram_str = f' {vram}GB' if vram else ''
 
-        model_cell = Text()
-        model_cell.append(m,        style=f'bold {uc}')
-        model_cell.append(vram_str, style=text_muted)
+        model_cell = Text(m, style=f'bold {uc}')
+        vram_cell = Text(f'{vram}G', style=text_muted) if vram else Text('')
 
         nodes = d.get('Nodes', [])
         n_count = len(nodes)
@@ -209,25 +197,13 @@ def build_cluster_renderable(
         else:
             demand_cell.append('     ', style=text_muted)
 
-        n_issues = issue_by_model.get(m, {}).get('total', 0)
-        weather_cell = Text()
-        weather_cell.append(_trouble_weather(n_issues))
-        if n_issues:
-            if n_issues > 10:
-                wc = _c_red
-            elif n_issues > 3:
-                wc = _c_yellow
-            else:
-                wc = text_muted
-            weather_cell.append(str(n_issues), style=wc)
-
         table.add_row(
             model_cell,
+            vram_cell,
             Text(f'{emoji} '),
             _bar(U, T),
             counts_cell,
             demand_cell,
-            weather_cell,
             Text(f' {n_count}× ', style=text_muted),
             _node_range_text(nodes, tv),
         )
@@ -252,11 +228,11 @@ def build_cluster_renderable(
         total_demand.append(f' ↑{total_pd}', style=dc)
     table.add_row(
         Text('Total', style=f'bold {uc}'),
+        Text(''),
         Text(f'{_usage_emoji(total_pct * 100)} '),
         _bar(total_U, total_T),
         total_counts,
         total_demand,
-        Text(''),
         Text(''),
         Text(''),
         style=f'on {total_bg}',
@@ -275,21 +251,17 @@ class ClusterBar(Static):
         self.set_interval(10, self._refresh_data)
 
     def _refresh_data(self) -> None:
-        # Snapshot theme variables on the main thread — the worker will use
-        # them to pre-build the renderable so the main thread does no rendering work.
         tv = self.app.theme_variables
-        issue_hours = getattr(self.app, '_issue_hours', 24)
         self.run_worker(
-            lambda: self._fetch(tv, issue_hours),
+            lambda: self._fetch(tv),
             thread=True, exclusive=True, group='cluster-bar',
         )
 
-    def _fetch(self, tv: Dict, issue_hours: int) -> None:
+    def _fetch(self, tv: Dict) -> None:
         from textual.worker import get_current_worker
         worker = get_current_worker()
         stats     = fetch_cluster_stats()
         job_stats = fetch_job_stats()
-        issue_stats = fetch_issue_stats(issue_hours)
         if not worker.is_cancelled:
-            renderable = build_cluster_renderable(stats, job_stats, issue_stats, tv)
+            renderable = build_cluster_renderable(stats, job_stats, tv)
             self.app.call_from_thread(self.update, renderable)

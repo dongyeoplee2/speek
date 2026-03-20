@@ -59,6 +59,54 @@ def fmt_time(start_str: str, mode: str = 'relative') -> str:
     return rel
 
 
+def report_error(widget, context: str = '') -> None:
+    """Log an exception to the app's notification bar.
+
+    Call inside an except block: ``except Exception: report_error(self, 'load')``.
+    Shows the error type + message as a Textual notification so the user
+    knows something went wrong instead of silently freezing.
+    """
+    import traceback
+    import sys
+    exc = sys.exc_info()[1]
+    if exc is None:
+        return
+    short = f'{type(exc).__name__}: {exc}'
+    label = f'[{context}] {short}' if context else short
+    try:
+        widget.app.notify(label[:120], severity='error', timeout=8)
+    except Exception:
+        pass
+    # Also print to stderr for debugging
+    try:
+        traceback.print_exc(file=sys.stderr)
+    except Exception:
+        pass
+
+
+def safe(context: str = ''):
+    """Decorator: wraps a widget method so exceptions show a notification
+    instead of being silently swallowed or crashing the app.
+
+    Usage::
+
+        @safe('history load')
+        def _load(self):
+            ...
+    """
+    import functools
+
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(self, *args, **kwargs):
+            try:
+                return fn(self, *args, **kwargs)
+            except Exception:
+                report_error(self, context or fn.__name__)
+        return wrapper
+    return decorator
+
+
 def tcs(tv: Dict[str, str], key: str, fallback: str = 'ansi_bright_black') -> str:
     """Safe theme color for Textual .styles.color. Maps Rich ANSI names to ansi_* prefix."""
     v = tv.get(key, fallback) or fallback

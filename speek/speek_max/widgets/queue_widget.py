@@ -12,7 +12,7 @@ from textual.widget import Widget
 from textual.widgets import Label, LoadingIndicator, Static
 
 from speek.speek_max.slurm import fetch_all_priorities, fetch_job_details, fetch_job_stats, fetch_queue
-from speek.speek_max._utils import tc
+from speek.speek_max._utils import tc, safe
 from speek.speek_max.widgets.datatable import SpeekDataTable
 from speek.speek_max.widgets.ping_tracker import PingTracker
 
@@ -191,15 +191,15 @@ class QueueWidget(Widget):
         dt = self.query_one(SpeekDataTable)
         self._col_widths = [3, 12, 20, 10, 5, 9, 9, 6, 24]
         dt.zebra_stripes = True
-        dt.add_column('#',         width=3)
-        dt.add_column('User',      width=12)
-        dt.add_column('Name',      width=20)
-        dt.add_column('Partition', width=10)
-        dt.add_column('GPU',       width=5)
-        dt.add_column('State',     width=9)
-        dt.add_column('Elapsed',   width=9)
-        dt.add_column('Prio',      width=6)
-        dt.add_column('IDs',       width=24)
+        dt.add_column('#',         width=2)
+        dt.add_column('User',      width=8)
+        dt.add_column('Name',      width=14)
+        dt.add_column('Partition', width=6)
+        dt.add_column('GPU',       width=3)
+        dt.add_column('State',     width=7)
+        dt.add_column('Elapsed',   width=7)
+        dt.add_column('Prio',      width=4)
+        dt.add_column('IDs',       width=10)
 
     def on_show(self) -> None:
         self._load()
@@ -255,6 +255,7 @@ class QueueWidget(Widget):
             stats_text = t
         self.app.call_from_thread(self._update, sig, built, stats_text, has_rows)
 
+    @safe('Queue update')
     def _update(self, sig: frozenset, built: List[Tuple],
                 stats_text: Optional[Text], has_rows: bool) -> None:
         if sig == self._last_queue_sig:

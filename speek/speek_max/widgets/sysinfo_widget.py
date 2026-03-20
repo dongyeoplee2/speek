@@ -181,6 +181,35 @@ class SysInfoWidget(Widget):
             val = cluster.get(key, '—')
             lines.append(f'  [dim]{label:<{W_NAME}}[/] {val}')
 
+        # ── GPU Hardware ──────────────────────────────────────────────────────
+        lines.append('')
+        lines.append('[bold $accent]── GPU Hardware ──[/]')
+        try:
+            from speek.speek_max.slurm import fetch_cluster_stats
+            stats = fetch_cluster_stats()
+            if stats:
+                for model in sorted(stats, key=lambda m: stats[m]['Total'], reverse=True):
+                    d = stats[model]
+                    vram = d.get('VRAM')
+                    cpu_pg = d.get('CPUperGPU')
+                    ram_pg = d.get('RAMperGPU')
+                    n_nodes = len(d.get('Nodes', []))
+                    total = d['Total']
+                    specs = []
+                    if vram:
+                        specs.append(f'VRAM {vram}GB')
+                    if cpu_pg:
+                        specs.append(f'{cpu_pg} CPUs/GPU')
+                    if ram_pg:
+                        specs.append(f'{ram_pg}GB RAM/GPU')
+                    specs.append(f'{n_nodes} node{"s" if n_nodes != 1 else ""}')
+                    specs.append(f'{total} GPUs')
+                    lines.append(f'  [bold]{model:<{W_NAME}}[/bold] [dim]{" · ".join(specs)}[/dim]')
+            else:
+                lines.append('  [dim]No GPU data available[/]')
+        except Exception:
+            lines.append('  [dim]Could not fetch GPU info[/]')
+
         # ── Commands + latency ───────────────────────────────────────────────
         lines.append('')
         lines.append('[bold $accent]── SLURM Commands ──[/]')

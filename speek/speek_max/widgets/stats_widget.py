@@ -13,6 +13,7 @@ from textual.widget import Widget
 from textual.widgets import Button, Input, Label, Select, Sparkline, Static
 
 from speek.speek_max.widgets.select import SpeekSelect
+from speek.speek_max._utils import safe
 
 _LOADING_ID  = '#stats-lbl-loading'
 _FILTER_BAR  = '#stats-filter-bar'
@@ -99,142 +100,112 @@ def _issue_color(n: int) -> str:
     return 'bold red'
 
 
-_BUCKET_STYLES = [
-    'bright_black', '#555555', '#994400', '#FF8C00', '#FF4500', 'bold red',
-]
 
-
-def _bucket_style(idx: int, n: int) -> str:
-    """Oldest(0)=dim → newest(n-1)=bright red gradient."""
-    if n <= 1:
-        return 'bold red'
-    slot = int(round(idx / (n - 1) * (len(_BUCKET_STYLES) - 1)))
-    return _BUCKET_STYLES[min(slot, len(_BUCKET_STYLES) - 1)]
-
-
-def _build_x_scale(max_val: int, width: int) -> str:
-    """Build a horizontal scale ruler: '0' at left, half at centre, max at right."""
-    left_s  = '0'
-    mid_s   = str(max_val // 2) if max_val > 1 else ''
-    right_s = str(max_val)
-    buf = [' '] * width
-    for i, c in enumerate(left_s):
-        buf[i] = c
-    if mid_s:
-        start = width // 2 - len(mid_s) // 2
-        for i, c in enumerate(mid_s):
-            if 0 <= start + i < width:
-                buf[start + i] = c
-    for i, c in enumerate(right_s):
-        pos = width - len(right_s) + i
-        if 0 <= pos < width:
-            buf[pos] = c
-    return ''.join(buf)
-
-
-def _build_issue_chart(ts_data: Dict, hours: int) -> Table:
-    """Horizontal stacked bar chart — same style as breakdown, rows=GPU,
-    each bar segment = one time period (oldest=dim → newest=bright red)."""
-    models       = ts_data.get('models', [])
-    bucket_labels = ts_data.get('bucket_labels', [])
-    data         = ts_data.get('data', {})
-    n_buckets    = len(bucket_labels)
-
-    BAR_W = 24
-
-    t = Table(box=None, show_header=True, expand=True, padding=(0, 1), show_edge=False)
-    t.add_column(f'GPU  [dim](last {hours}h)[/dim]', style='bold', min_width=14, no_wrap=True)
-    t.add_column('Issues',  justify='right', min_width=7)
-    t.add_column('',        min_width=BAR_W)   # bar — header filled after max_total known
-
-    if not models or not n_buckets:
-        t.add_row(Text('(no issues)', style='dim'), Text(''), Text(''))
-        return t
-
-    max_total = max(
-        (sum(b.get('total', 0) for b in data.get(m, [])) for m in models),
-        default=0,
-    )
-    if max_total == 0:
-        t.add_row(Text('(no issues in this period)', style='dim'), Text(''), Text(''))
-        return t
-
-    # Rebuild table with scale header on bar column
-    t = Table(box=None, show_header=True, expand=True, padding=(0, 1), show_edge=False)
-    t.add_column(f'GPU  [dim](last {hours}h)[/dim]', style='bold', min_width=14, no_wrap=True)
-    t.add_column('Issues',  justify='right', min_width=7)
-    scale_hdr = Text(_build_x_scale(max_total, BAR_W), style='dim')
-    t.add_column(scale_hdr, min_width=BAR_W)   # bar with scale header
-    for model in models[:12]:
-        buckets  = data.get(model, [])
-        b_totals = [b.get('total', 0) for b in buckets]
-        total    = sum(b_totals)
-        b_sum    = sum(b_totals)
-        filled   = max(1, int(round(total / max_total * BAR_W))) if total else 0
-
-        bar    = Text()
-        actual = 0
-        if b_sum > 0 and filled > 0:
-            widths = [int(bt / b_sum * filled + 0.5) for bt in b_totals]
-            diff   = filled - sum(widths)
-            if diff != 0 and widths:
-                mx_i = max(range(n_buckets), key=lambda i, bt=b_totals: bt[i])
-                widths[mx_i] = max(0, widths[mx_i] + diff)  # noqa: cell-var-from-loop
-            for i, w in enumerate(widths):
-                if w > 0:
-                    bar.append('█' * w, style=_bucket_style(i, n_buckets))
-                    actual += w
-        elif filled > 0:
-            bar.append('█' * filled, style='bold red')
-            actual = filled
-        bar.append('░' * (BAR_W - actual), style='dim')
-
-        t.add_row(model[:16], Text(str(total), style=_issue_color(total)), bar)
-
-    # Legend row: time bucket labels with their period colors
-    legend = Text()
-    for i, lbl in enumerate(bucket_labels):
-        legend.append('█ ', style=_bucket_style(i, n_buckets))
-        legend.append(f'{lbl}  ', style='dim')
-    t.add_row(Text(''), Text(''), legend)
-    return t
-
-
-def _build_issue_table(data: Dict, hours: int) -> Table:
+def _build_issues(data: Dict, hours: int) -> Table:
+    """Clean issues overview: summary header + per-partition bars + per-node bars."""
     by_model = data.get('by_model', {})
     by_node  = data.get('by_node',  {})
+    BAR_W = 20
 
-    t = Table(box=None, show_header=True, expand=True,
+    t = Table(box=None, show_header=False, expand=True,
               padding=(0, 1), show_edge=False)
-    t.add_column(f'Issues  [dim](last {hours}h)[/dim]',
-                 style='bold', min_width=16, no_wrap=True)
-    t.add_column('Failed',  justify='right', min_width=7)
-    t.add_column('Timeout', justify='right', min_width=8)
-    t.add_column('OOM',     justify='right', min_width=5)
-    t.add_column('Total',   justify='right', min_width=6)
-
-    def _row(name: str, d: Dict) -> None:
-        tot = d.get('total', 0)
-        c = _issue_color(tot)
-        t.add_row(
-            Text(name[:22]),
-            Text(str(d.get('failed',  0)), style=_issue_color(d.get('failed',  0))),
-            Text(str(d.get('timeout', 0)), style=_issue_color(d.get('timeout', 0))),
-            Text(str(d.get('oom',     0)), style=_issue_color(d.get('oom',     0))),
-            Text(str(tot), style=c),
-        )
+    t.add_column('', min_width=12, no_wrap=True)  # name
+    t.add_column('', justify='right', min_width=4)  # F
+    t.add_column('', justify='right', min_width=4)  # T
+    t.add_column('', justify='right', min_width=4)  # O
+    t.add_column('', min_width=BAR_W)  # bar
 
     if not by_model and not by_node:
-        t.add_row(Text('(no issues)'), Text(''), Text(''), Text(''), Text(''))
+        t.add_row(
+            Text(f'No issues in the last {hours}h', style='dim green'),
+            Text(''), Text(''), Text(''), Text('✓', style='bold green'),
+        )
         return t
 
+    # Totals
+    total_f = sum(d.get('failed', 0) for d in by_model.values())
+    total_t = sum(d.get('timeout', 0) for d in by_model.values())
+    total_o = sum(d.get('oom', 0) for d in by_model.values())
+    total_all = total_f + total_t + total_o
+
+    # Summary header
+    summary = Text()
+    summary.append(f'{total_all}', style='bold red' if total_all else 'bold green')
+    summary.append(f' issues ', style='dim')
+    summary.append(f'(last {hours}h)', style='dim')
+    t.add_row(summary, Text(''), Text(''), Text(''), Text(''))
+
+    # Column labels
+    t.add_row(
+        Text('Partition', style='bold'),
+        Text('F', style='bold red'),
+        Text('T', style='bold yellow'),
+        Text('O', style='bold #ff00ff'),
+        Text('', style='dim'),
+    )
+
+    max_total = max((d.get('total', 0) for d in by_model.values()), default=1) or 1
     for name in sorted(by_model, key=lambda k: by_model[k].get('total', 0), reverse=True):
-        _row(name, by_model[name])
+        d = by_model[name]
+        f, to, o, tot = d.get('failed', 0), d.get('timeout', 0), d.get('oom', 0), d.get('total', 0)
+        # Stacked bar: red=failed, yellow=timeout, magenta=OOM
+        bar = Text()
+        w_total = max(1, int(round(tot / max_total * BAR_W)))
+        w_f = int(round(f / tot * w_total)) if tot else 0
+        w_o = int(round(o / tot * w_total)) if tot else 0
+        w_t = w_total - w_f - w_o
+        if w_f > 0: bar.append('█' * w_f, style='red')
+        if w_t > 0: bar.append('█' * w_t, style='yellow')
+        if w_o > 0: bar.append('█' * w_o, style='#ff00ff')
+        bar.append('░' * (BAR_W - w_total), style='dim')
+        t.add_row(
+            Text(name[:14], style='bold'),
+            Text(str(f), style=_issue_color(f)) if f else Text('·', style='dim'),
+            Text(str(to), style=_issue_color(to)) if to else Text('·', style='dim'),
+            Text(str(o), style=_issue_color(o)) if o else Text('·', style='dim'),
+            bar,
+        )
 
     if by_node:
-        t.add_section()
-        for name in sorted(by_node, key=lambda k: by_node[k].get('total', 0), reverse=True)[:10]:
-            _row(name, by_node[name])
+        t.add_row(Text(''), Text(''), Text(''), Text(''), Text(''))
+        t.add_row(
+            Text('Node', style='bold'),
+            Text('F', style='bold red'),
+            Text('T', style='bold yellow'),
+            Text('O', style='bold #ff00ff'),
+            Text('', style='dim'),
+        )
+        max_node = max((d.get('total', 0) for d in by_node.values()), default=1) or 1
+        for name in sorted(by_node, key=lambda k: by_node[k].get('total', 0), reverse=True)[:8]:
+            d = by_node[name]
+            f, to, o, tot = d.get('failed', 0), d.get('timeout', 0), d.get('oom', 0), d.get('total', 0)
+            bar = Text()
+            w_total = max(1, int(round(tot / max_node * BAR_W)))
+            w_f = int(round(f / tot * w_total)) if tot else 0
+            w_o = int(round(o / tot * w_total)) if tot else 0
+            w_t = w_total - w_f - w_o
+            if w_f > 0: bar.append('█' * w_f, style='red')
+            if w_t > 0: bar.append('█' * w_t, style='yellow')
+            if w_o > 0: bar.append('█' * w_o, style='#ff00ff')
+            bar.append('░' * (BAR_W - w_total), style='dim')
+            t.add_row(
+                Text(name[:14]),
+                Text(str(f), style=_issue_color(f)) if f else Text('·', style='dim'),
+                Text(str(to), style=_issue_color(to)) if to else Text('·', style='dim'),
+                Text(str(o), style=_issue_color(o)) if o else Text('·', style='dim'),
+                bar,
+            )
+
+    # Legend
+    t.add_row(Text(''), Text(''), Text(''), Text(''), Text(''))
+    legend = Text()
+    legend.append('█', style='red')
+    legend.append(' Failed  ', style='dim')
+    legend.append('█', style='yellow')
+    legend.append(' Timeout  ', style='dim')
+    legend.append('█', style='#ff00ff')
+    legend.append(' OOM', style='dim')
+    t.add_row(Text(''), Text(''), Text(''), Text(''), legend)
 
     return t
 
@@ -468,10 +439,9 @@ class StatsWidget(Widget):
 
         def _worker():
             try:
-                from speek.speek_max.slurm import fetch_issue_stats, fetch_issue_timeseries
-                data    = fetch_issue_stats(hours)
-                ts_data = fetch_issue_timeseries(hours)
-                self.app.call_from_thread(self._render_issues, data, ts_data, hours)
+                from speek.speek_max.slurm import fetch_issue_stats
+                data = fetch_issue_stats(hours)
+                self.app.call_from_thread(self._render_issues, data, {}, hours)
             except Exception:
                 pass
 
@@ -510,6 +480,7 @@ class StatsWidget(Widget):
 
         self.run_worker(_worker, thread=True, exclusive=True, group='stats-load')
 
+    @safe('Stats render')
     def _render_partial(self, ts: Dict, bd: List[Dict], loading_label: str = '') -> None:
         """Called from worker thread via call_from_thread for each day chunk."""
         self._render_stats(ts, bd)
@@ -680,11 +651,11 @@ class StatsWidget(Widget):
             self._w_hover.update('')
             self._w_hover.styles.offset = (0, 0)
 
+    @safe('Stats issues')
     def _render_issues(self, data: Dict, ts_data: Dict, hours: int) -> None:
         try:
             self.query_one('#stats-issue-chart', Static).update(
-                _build_issue_chart(ts_data, hours))
-            self.query_one('#stats-issue-table', Static).update(
-                _build_issue_table(data, hours))
+                _build_issues(data, hours))
+            self.query_one('#stats-issue-table', Static).update('')
         except Exception:
             pass

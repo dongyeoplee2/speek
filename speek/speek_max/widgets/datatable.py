@@ -43,8 +43,8 @@ SpeekDataTable {
         Binding("end", "scroll_end", "End", show=False),
         Binding("g,ctrl+home", "scroll_top", "Top", show=False),
         Binding("G,ctrl+end", "scroll_bottom", "Bottom", show=False),
-        Binding("s", "sort_column", "Sort", show=True),
-        Binding("slash", "start_filter", "/ Filter", show=True),
+        Binding("s", "sort_column", "Sort", show=False),
+        Binding("slash", "start_filter", "/ Filter", show=False),
     ]
 
     def __init__(self, *args: Any, **kwargs: Any):

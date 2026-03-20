@@ -40,9 +40,16 @@ SpeekMax {
   padding: 0 1;
 
   #app-title-left {
-    width: 1fr;
+    width: auto;
     color: $text-primary;
     text-style: bold;
+    background: $background;
+  }
+
+  #app-title-center {
+    width: 1fr;
+    text-align: center;
+    color: $text-muted;
     background: $background;
   }
 
@@ -533,6 +540,14 @@ HistoryWidget {
   border-title-align: right;
 }
 
+.history-empty {
+  width: 1fr;
+  height: 1fr;
+  content-align: center middle;
+  text-style: italic;
+  color: $text-muted;
+}
+
 /* ── SysInfo widget ─────────────────────────────────────────────────────── */
 SysInfoWidget {
   height: 1fr;
@@ -913,7 +928,7 @@ CommandBar {
 #cmd-bar {
   width: 1fr;
   background: $background;
-  border: round $border;
+  border: round white;
   height: 3;
   padding: 0 1;
 }
