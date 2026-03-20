@@ -2,11 +2,12 @@ name: Deploy Documentation
 
 on:
   push:
-    branches: [main]
+    branches: [main, "changes/*"]
     paths:
       - "docs/**"
       - "speek/**"
       - "pyproject.toml"
+      - ".github/workflows/docs.yml"
   workflow_dispatch:
 
 permissions:
