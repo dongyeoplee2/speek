@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
 from rich.text import Text
 
@@ -48,18 +48,13 @@ def _style_line(line: str) -> Text:
     return t
 
 
-def scan_log(log_path: str, tail: Optional[int] = None) -> Optional[Text]:
-    """Return a Rich Text block of the log, patterns highlighted.
-
-    tail=None (default) reads the full file. tail=N reads the last N lines.
-    """
+def scan_log(log_path: str, tail: int = 40) -> Optional[Text]:
+    """Return a Rich Text block of the last `tail` lines, patterns highlighted."""
     try:
         p = Path(log_path)
         if not p.exists():
             return None
-        lines = p.read_text(errors='replace').splitlines()
-        if tail:
-            lines = lines[-tail:]
+        lines = p.read_text(errors='replace').splitlines()[-tail:]
         result = Text()
         for i, ln in enumerate(lines):
             if i:
@@ -68,46 +63,6 @@ def scan_log(log_path: str, tail: Optional[int] = None) -> Optional[Text]:
         return result
     except Exception as e:
         return Text(f'Could not read log: {e}', style='red')
-
-
-def scan_log_incremental(
-    log_path: str,
-    start_byte: int = 0,
-    tail: int = 500,
-) -> Tuple[Optional[Text], int]:
-    """Read a log file and return (highlighted_text, end_byte_offset).
-
-    start_byte=0 (first open): reads the last `tail` lines; returns file size
-        as the cursor for the next incremental call.
-    start_byte>0 (refresh): reads only bytes from start_byte to EOF and appends
-        them to the existing view.  Returns (empty Text, start_byte) when there
-        is nothing new, so callers can detect a no-op.
-    Returns (None, 0) when the file does not exist or on read error.
-    """
-    try:
-        p = Path(log_path)
-        if not p.exists():
-            return None, 0
-        file_size = p.stat().st_size
-        if start_byte > 0:
-            if file_size <= start_byte:
-                return Text(), start_byte          # nothing new
-            with p.open('rb') as f:
-                f.seek(start_byte)
-                chunk = f.read(file_size - start_byte)
-            lines = chunk.decode('utf-8', errors='replace').splitlines()
-        else:
-            lines = p.read_text(errors='replace').splitlines()
-            if tail and len(lines) > tail:
-                lines = lines[-tail:]
-        result = Text()
-        for i, ln in enumerate(lines):
-            if i or start_byte > 0:
-                result.append('\n')
-            result.append_text(_style_line(ln))
-        return result, file_size
-    except Exception as e:
-        return Text(f'Could not read log: {e}', style='red'), 0
 
 
 def extract_hint(log_path: str) -> Optional[str]:

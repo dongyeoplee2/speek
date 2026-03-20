@@ -45,7 +45,7 @@ html_static_path = ["_static"]
 html_title = "👁 speek"
 html_theme_options = {
     "show_toc_level": 2,
-    "repository_url": "https://github.com/edong6768/speek",
+    "repository_url": "https://github.com/dongyeoplee2/speek",
     "use_repository_button": True,
     "navigation_with_keys": False,
 }

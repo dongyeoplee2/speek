@@ -6,4 +6,3 @@ tmp/
 # Docs build artifacts
 docs/_build/
 docs/api/
-CLAUDE.md

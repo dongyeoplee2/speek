@@ -3,143 +3,70 @@ from __future__ import annotations
 
 import argparse
 import getpass
-import os
-import signal
 import subprocess
 from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.geometry import Size
-from textual.screen import Screen
 from textual.widgets import Footer, Label, TabPane, TabbedContent
 
-
 from speek.speek_max.themes import DEFAULT_THEME, SPEEK_THEMES, THEME_NAMES
-from speek.speek_max._utils import tc
 from speek.speek_max.widgets.cluster_bar import ClusterBar
-from speek.speek_max.widgets.settings_widget import SettingsWidget
+from speek.speek_max.widgets.config_widget import ConfigWidget
 from speek.speek_max.widgets.confirmation import ConfirmationModal
 from speek.speek_max.widgets.history_widget import HistoryWidget
 from speek.speek_max.widgets.my_jobs_widget import MyJobsWidget
 from speek.speek_max.widgets.node_widget import NodeWidget
+from speek.speek_max.widgets.priority_widget import PriorityWidget
 from speek.speek_max.widgets.queue_widget import QueueWidget
 from speek.speek_max.widgets.command_bar import CommandBar
-from speek.speek_max.widgets.help_widget import HelpWidget
-from speek.speek_max.widgets.stats_widget import StatsWidget
-from speek.speek_max.widgets.sysinfo_widget import SysInfoWidget
 from speek.speek_max.widgets.panel_divider import PanelDivider
 from speek.speek_max.widgets.users_widget import UsersWidget
 
 
-class _SpeekScreen(Screen):
-    """Default screen with a corrected outer_size.
-
-    Textual never calls _size_updated on the Screen (root widget), so
-    Screen._size stays Size(0,0) forever.  Screen._on_timer_update calls
-    _refresh_layout(size=None), which falls back to self.outer_size
-    (= self._size = Size(0,0)) and bails out immediately – silently
-    dropping every layout change that originates from an async data load
-    (e.g. ClusterBar expanding after sinfo returns).
-
-    Overriding outer_size to delegate to Screen.size (which reads
-    app.size directly) makes every timer-driven layout refresh use the
-    real terminal dimensions, so height:auto widgets that grow after
-    mount correctly re-flow the compositor.
-    """
-
-    @property
-    def outer_size(self) -> Size:
-        s = self.size  # Screen.size = app.size - gutter (always correct)
-        return s if s else super().outer_size
-
-
-class SpeekMax(App[None]):
+class SpeekMax(App):
     """speek-max: SLURM cluster monitor TUI."""
 
     CSS_PATH = Path(__file__).parent / "speek_max.scss"
     TITLE = "speek-max"
 
-    def get_default_screen(self) -> _SpeekScreen:
-        return _SpeekScreen()
-
     BINDINGS = [
         Binding("1", "switch_tab('queue')",    "Queue",    show=False),
         Binding("2", "switch_tab('nodes')",    "Nodes",    show=False),
-        Binding("3", "switch_tab('users')",    "Users",    show=False),
-        Binding("4", "switch_tab('stats')",    "Stats",    show=False),
-        Binding("5", "switch_tab('settings')", "Settings", show=False),
-        Binding("6", "switch_tab('sysinfo')",  "Info",     show=False),
-        Binding("7", "switch_tab('help')",     "Help",     show=False),
-        Binding("d", "view_details",           "Details",  show=True),
-        Binding("f", "switch_focus",           "⇥ Focus",  show=True),
-        Binding("colon", "focus_command",      "Shell",    show=True),
-        Binding("q", "quit",                   "Quit",     show=True),
+        Binding("3", "switch_tab('priority')", "Priority", show=False),
+        Binding("4", "switch_tab('users')",    "Users",    show=False),
+        Binding("5", "switch_tab('config')",   "Config",   show=False),
+        Binding("ctrl+t", "next_theme", "Next theme", show=True),
+        Binding("q", "quit", "Quit", show=True),
     ]
 
     def __init__(self, theme_name: str = DEFAULT_THEME, user: str = "", **kwargs) -> None:
         super().__init__(**kwargs)
         self._initial_theme = theme_name
         self.user = user or getpass.getuser()
-        self._issue_hours: int = 24
-        # Refresh intervals (seconds)
-        self._queue_refresh: int = 5
-        self._node_refresh: int = 30
-        self._history_refresh: int = 30
-        self._history_lookback_days: int = 7
-        # SLURM command toggles (master switches per command)
-        self._cmd_squeue: bool = True
-        self._cmd_scontrol: bool = True
-        self._cmd_sacct: bool = True
-        self._cmd_sinfo: bool = True
-        # Feature flags
-        self._feat_history: bool = True      # sacct history widget
-        self._feat_issue_stats: bool = True  # sacct issue stats
-        self._feat_priority: bool = True     # squeue priority in popup
-        self._feat_sacct_details: bool = True  # sacct fallback for completed jobs
-        # Highlight durations
-        self._ping_duration: int = 10         # cell change ping (seconds)
-        self._event_fade: int = 600           # event row fade (seconds)
-        # Display
-        self._time_format: str = 'relative'   # relative | absolute | both
         # Register all themes
         for name, theme in SPEEK_THEMES.items():
             try:
                 self.register_theme(theme)
             except Exception:
                 pass
-        # Apply saved settings (overrides defaults)
-        from speek.speek_max.widgets.settings_widget import SettingsWidget
-        saved = SettingsWidget.load_saved_settings()
-        if saved:
-            for key, val in saved.items():
-                if key == 'theme':
-                    self._initial_theme = val
-                elif hasattr(self, key):
-                    setattr(self, key, val)
 
     def on_mount(self) -> None:
         try:
             self.theme = self._initial_theme
         except Exception:
             pass
-        # Some terminals (e.g. iTerm2) don't activate mouse tracking until the
-        # first SIGWINCH.  Send one to ourselves after the first render so the
-        # compositor re-checks the terminal size and mouse events start working
-        # immediately without requiring a manual window resize.
-        self.set_timer(0.1, lambda: os.kill(os.getpid(), signal.SIGWINCH))
+        self.set_timer(0.1, lambda: self.screen.refresh(layout=True))
         from speek.speek_max.event_watcher import EventWatcher
         self._watcher = EventWatcher(self, self.user)
         self.set_timer(2.0, self._watcher.start)
-        # Apply probe cache immediately (fast — just reads JSON), then
-        # run a background probe on first launch or when cache is stale.
-        self.run_worker(self._startup_probe, thread=True, group='probe')
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id='app-title'):
-            yield Label('speek-max  [dim]v0.0.3[/dim]', id='app-title-left', markup=True)
-            yield Label('', id='app-title-right', markup=True)
+        from rich.text import Text as RichText
+        from speek.speek_max._utils import tc
+        tv = {}  # theme not ready yet; use CSS class instead
+        yield Label('speek-max  [dim]v0.0.3[/dim]', id='app-title', markup=True)
         with Horizontal(id='main-layout'):
             with Vertical(id='left-panel'):
                 yield ClusterBar()
@@ -148,36 +75,18 @@ class SpeekMax(App[None]):
                         yield QueueWidget()
                     with TabPane("Nodes [2]", id="nodes"):
                         yield NodeWidget()
-                    with TabPane("Users [3]", id="users"):
+                    with TabPane("Priority [3]", id="priority"):
+                        yield PriorityWidget(user=self.user)
+                    with TabPane("Users [4]", id="users"):
                         yield UsersWidget()
-                    with TabPane("Stats [4]", id="stats"):
-                        yield StatsWidget()
-                    with TabPane("Settings [5]", id="settings"):
-                        yield SettingsWidget()
-                    with TabPane("Info [6]", id="sysinfo"):
-                        yield SysInfoWidget()
-                    with TabPane("Help [7]", id="help"):
-                        yield HelpWidget()
+                    with TabPane("Config [5]", id="config"):
+                        yield ConfigWidget()
             yield PanelDivider()
             with Vertical(id='side-panel'):
                 yield MyJobsWidget(user=self.user)
                 yield HistoryWidget()
         yield CommandBar()
         yield Footer()
-
-    def _startup_probe(self) -> None:
-        """Run in a worker thread: load or refresh probe cache, apply to slurm fields."""
-        from speek.speek_max.probe import get_probe_results
-        from speek.speek_max import slurm as _slurm
-        probe = get_probe_results()   # fast if cache is fresh; runs probes if not
-        _slurm.apply_probe(probe)
-        # Refresh the Info tab if it's been mounted
-        def _refresh() -> None:
-            try:
-                self.query_one(SysInfoWidget)._render_results()
-            except Exception:
-                pass
-        self.call_from_thread(_refresh)
 
     def action_switch_tab(self, tab_id: str) -> None:
         try:
@@ -189,184 +98,74 @@ class SpeekMax(App[None]):
         idx = THEME_NAMES.index(self.theme) if self.theme in THEME_NAMES else 0
         self.theme = THEME_NAMES[(idx + 1) % len(THEME_NAMES)]
 
-    def action_view_details(self) -> None:
-        """Open details for the selected job in whichever panel has focus."""
-        try:
-            mj = self.query_one(MyJobsWidget)
-            if mj.has_focus_within:
-                mj.action_view_job()
-                return
-        except Exception:
-            pass
-        try:
-            hw = self.query_one(HistoryWidget)
-            if hw.has_focus_within:
-                hw.action_view_log()
-                return
-        except Exception:
-            pass
-
-    def action_focus_command(self) -> None:
-        """Focus the command bar input."""
-        try:
-            from textual.widgets import Input
-            self.query_one(CommandBar).query_one('#cmd-input', Input).focus()
-        except Exception:
-            pass
-
-    def on_command_bar_command_executed(self, event: CommandBar.CommandExecuted) -> None:
-        """Refresh data after sbatch/scancel commands."""
-        cmd_name = event.command.split()[0] if event.command else ''
-        if cmd_name in ('sbatch', 'scancel'):
-            try:
-                self.query_one(MyJobsWidget)._load()
-            except Exception:
-                pass
-            try:
-                self.query_one(HistoryWidget)._load()
-            except Exception:
-                pass
-
-    def on_key(self, event) -> None:
-        # When History widget has focus, route 1/2/3 to its tab switching
-        if event.key in ('1', '2', '3'):
-            try:
-                hw = self.query_one(HistoryWidget)
-                if hw.has_focus_within:
-                    event.prevent_default()
-                    event.stop()
-                    tab_map = {'1': 'tab_unread', '2': 'tab_read', '3': 'tab_all'}
-                    getattr(hw, f'action_{tab_map[event.key]}')()
-                    return
-            except Exception:
-                pass
-        # When MyJobs widget has focus, route 1/2 to its tab switching
-        if event.key in ('1', '2'):
-            try:
-                mj = self.query_one(MyJobsWidget)
-                if mj.has_focus_within:
-                    event.prevent_default()
-                    event.stop()
-                    mj_map = {'1': 'tab_current', '2': 'tab_history'}
-                    getattr(mj, f'action_{mj_map[event.key]}')()
-                    return
-            except Exception:
-                pass
-
-        # Let CommandBar handle Tab for autocomplete when its input is focused
-        if event.key == 'tab':
-            try:
-                cmd_input = self.query_one(CommandBar).query_one('#cmd-input')
-                if cmd_input.has_focus:
-                    return  # Don't intercept — CommandBar handles it
-            except Exception:
-                pass
-            event.prevent_default()
-            self.action_switch_focus()
-
-    def action_switch_focus(self) -> None:
-        """Cycle focus: left panel → MyJobs → History → left panel."""
-        from speek.speek_max.widgets.datatable import SpeekDataTable
-        try:
-            mj = self.query_one(MyJobsWidget)
-            hw = self.query_one(HistoryWidget)
-            lp = self.query_one('#left-panel')
-        except Exception:
-            return
-        if hw.has_focus_within:
-            try:
-                lp.query(SpeekDataTable).first().focus()
-            except Exception:
-                lp.focus()
-        elif mj.has_focus_within:
-            try:
-                hw.query_one(SpeekDataTable).focus()
-            except Exception:
-                hw.focus()
-        else:
-            try:
-                mj.query_one(SpeekDataTable).focus()
-            except Exception:
-                mj.focus()
-
     # ── Message handlers ──────────────────────────────────────────────────────
-
-    def _update_title_right(self) -> None:
-        tv        = self.theme_variables
-        c_success = tc(tv, 'text-success', 'green')
-        c_warning = tc(tv, 'text-warning', 'yellow')
-        c_error   = tc(tv, 'text-error',   'red')
-        label = self.query_one('#app-title-right', Label)
-        parts = []
-        running   = getattr(self, '_running',   0)
-        pending   = getattr(self, '_pending',   0)
-        failed    = getattr(self, '_ev_failed',    0)
-        timeout   = getattr(self, '_ev_timeout',   0)
-        completed = getattr(self, '_ev_completed', 0)
-        unread    = getattr(self, '_unread',  0)
-        if running:
-            parts.append(f'[bold {c_success}]▶ {running}[/]')
-        if pending:
-            parts.append(f'[bold {c_warning}]⏸ {pending}[/]')
-        if failed:
-            parts.append(f'[bold {c_error}]✗ {failed}F[/]')
-        if timeout:
-            parts.append(f'[bold {c_warning}]⏱ {timeout}T[/]')
-        if completed:
-            parts.append(f'[dim]✔ {completed}C[/dim]')
-        # Fallback: any other unread not covered above
-        other = unread - failed - timeout - completed
-        if other > 0:
-            parts.append(f'[bold {c_error}]⚠ {other}[/]')
-        label.update('  '.join(parts))
-
-    def on_history_widget_unread_count(self, event: HistoryWidget.UnreadCount) -> None:
-        self._unread = event.count
-        self._update_title_right()
-
-    def on_history_widget_status_counts(self, event: HistoryWidget.StatusCounts) -> None:
-        self._ev_failed    = event.failed
-        self._ev_timeout   = event.timeout
-        self._ev_completed = event.completed
-        self._update_title_right()
-
-    def on_my_jobs_widget_running_count(self, event: MyJobsWidget.RunningCount) -> None:
-        self._running = event.running
-        self._pending = event.pending
-        self._update_title_right()
 
     def on_my_jobs_widget_cancel_requested(
         self, event: MyJobsWidget.CancelRequested
     ) -> None:
-        job_ids = event.job_ids
-        ids_str = ', '.join(job_ids)
+        job_id = event.job_id
 
         def _do_cancel(confirmed: bool) -> None:
-            if not confirmed:
-                return
-            failed = []
-            for jid in job_ids:
+            if confirmed:
                 try:
-                    subprocess.run(['scancel', jid], check=True)
+                    subprocess.run(['scancel', job_id], check=True)
+                    self.notify(f'Job {job_id} cancelled', severity='information')
+                    try:
+                        self.query_one(HistoryWidget)._load()
+                        self.query_one(MyJobsWidget)._load()
+                    except Exception:
+                        pass
                 except Exception as e:
-                    failed.append(f'{jid}({e})')
-            if failed:
-                self.notify(f'scancel failed: {", ".join(failed)}', severity='error')
-            else:
-                self.notify(f'Cancelled: {ids_str}', severity='information')
-            try:
-                self.query_one(HistoryWidget)._load()
-                self.query_one(MyJobsWidget)._load()
-            except Exception:
-                pass
+                    self.notify(f'scancel failed: {e}', severity='error')
 
         self.push_screen(
-            ConfirmationModal(f'Cancel jobs: {ids_str}?'),
+            ConfirmationModal(f"Cancel job {job_id}?"),
             _do_cancel,
         )
 
-    # MyJobs and History handle their own JobInfoModal popups directly —
-    # no app-level handlers needed.
+    def on_my_jobs_widget_explain_job(
+        self, event: MyJobsWidget.ExplainJob
+    ) -> None:
+        self.action_switch_tab('priority')
+        try:
+            pw = self.query_one(PriorityWidget)
+            pw.load_job(event.job_id)
+        except Exception:
+            pass
+
+    def on_my_jobs_widget_view_log(self, event: MyJobsWidget.ViewLog) -> None:
+        self._show_log(event.job_id, event.log_path)
+
+    def on_history_widget_view_log(self, event: HistoryWidget.ViewLog) -> None:
+        from speek.speek_max.slurm import get_job_log_path
+
+        def _fetch_and_show() -> None:
+            path = get_job_log_path(event.job_id)
+            self.call_from_thread(lambda: self._show_log(event.job_id, path))
+
+        self.run_worker(_fetch_and_show, thread=True, group='log-view')
+
+    def _show_log(self, job_id: str, log_path: str | None) -> None:
+        if not log_path:
+            self.notify(f'No log file found for job {job_id}', severity='warning')
+            return
+        try:
+            from pathlib import Path as _Path
+            p = _Path(log_path)
+            if not p.exists():
+                self.notify(f'Log file not found: {log_path}', severity='warning')
+                return
+            # Read last 200 lines and show as notification / modal
+            lines = p.read_text(errors='replace').splitlines()
+            snippet = '\n'.join(lines[-50:])
+            self.notify(
+                f'Log: {log_path}\n{snippet[:500]}',
+                title=f'Job {job_id} log',
+                severity='information',
+                timeout=15,
+            )
+        except Exception as e:
+            self.notify(f'Could not read log: {e}', severity='error')
 
 
 def main() -> None:

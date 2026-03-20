@@ -31,7 +31,7 @@ Monitor all RUNNING and PENDING jobs cluster-wide, with priority scores, estimat
 Install speek directly from GitHub:
 
 ```bash
-pip install git+https://github.com/edong6768/speek.git
+pip install git+https://github.com/dongyeoplee2/speek.git
 ```
 
 Then run any of the three interfaces:

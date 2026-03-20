@@ -5,26 +5,18 @@
 - Python ≥ 3.8
 - Access to a SLURM cluster (`squeue`, `scontrol`, `sinfo`, `sacct` must be available in `PATH`)
 
-## From GitHub (latest)
+## From GitHub
 
 ```bash
-pip install git+https://github.com/edong6768/speek.git
+pip install git+https://github.com/dongyeoplee2/speek.git
 ```
-
-## From a specific branch
-
-```bash
-pip install git+https://github.com/edong6768/speek.git@changes/0.0.3
-```
-
-Replace `changes/0.0.3` with any branch or tag name.
 
 ## Development setup
 
 speek uses [uv](https://docs.astral.sh/uv/) for dependency management:
 
 ```bash
-git clone https://github.com/edong6768/speek.git
+git clone https://github.com/dongyeoplee2/speek.git
 cd speek
 uv sync
 ```

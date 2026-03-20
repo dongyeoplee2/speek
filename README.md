@@ -1,100 +1,53 @@
-# speek
+# 🔍 speek
 
-**[Documentation](https://edong6768.github.io/speek/)** | **[Changelog](CHANGELOG.md)**
-
-**speek** lets you peek into SLURM cluster resources — GPU availability, job status, user usage, priority scores, and more.
+**speek** lets you peek into slurm resource info such as GPU avaiability, usage per user, job status, and more.
 
 ![image](assets/screen.png)
 
-## Features
-
-- **Cluster overview** — GPU utilisation per model with colour-coded bars, demand pressure, and node ranges
-- **Job queue** — all RUNNING/PENDING jobs with priority scores and estimated wait times
-- **My Jobs** — your active jobs grouped by project, with history tab showing completed/failed jobs
-- **Events** — job state-change timeline with read/unread tracking and relaunch for failed jobs
-- **Node status** — per-node GPU breakdown with state indicators
-- **User analytics** — GPU-hours, success rates, fairshare scores
-- **Stats** — GPU usage timelines with sparkline charts and issue tracking
-- **Shell** — built-in command bar with autocomplete for all SLURM commands
-- **80+ themes** — base16 colour schemes + custom YAML themes
-- **Persistent settings** — save preferences, command history, and read state across sessions
+<!-- > [!NOTE]
+>
+> See also the GitHub official GitHub Pages Action first.
+>
+> - [GitHub Pages now uses Actions by default | The GitHub Blog](https://github.blog/2022-08-10-github-pages-now-uses-actions-by-default/)
+> - [GitHub Pages: Custom GitHub Actions Workflows (beta) | GitHub Changelog](https://github.blog/changelog/2022-07-27-github-pages-custom-github-actions-workflows-beta/) -->
 
 ## Installation
-
-### From GitHub (latest)
-
 ```sh
 pip install git+https://github.com/edong6768/speek.git
 ```
 
-### From a specific branch
-
-```sh
-pip install git+https://github.com/edong6768/speek.git@changes/0.0.3
-```
-
-### Development setup
-
-```sh
-git clone https://github.com/edong6768/speek.git
-cd speek
-uv sync          # or: pip install -e .
-```
 
 ## Usage
-
-> **Note:** Run from a node or login shell with SLURM access (`squeue`, `sinfo`, `sacct`, etc.).
-
-### speek (classic)
+> [!Important]
+> Make sure to activate the conda environment that has speek installed before using it.
 
 ```sh
-speek [-u USER] [-l] [-f FILE] [-t T_AVAIL]
+$ speek [-h] [-u USER] [-l] [-f FILE] [-t T_AVAIL]
 ```
 
-| Flag | Description |
-| ---- | ----------- |
-| `-u USER` | Highlight a specific user (default: self) |
-| `-l` | Live refresh every 1 second |
-| `-f FILE` | User info file |
-| `-t T_AVAIL` | Upcoming release time window (e.g. `5m`, `1h`, `1d`) |
+|Options (short)|Options (long)|Description|
+|-|-|-|
+|`-h`|`--help`|show this help message and exit|
+|`-u` `USER`|`--user` `USER`| Specify highlighted user. (default: self) |
+|`-l`|`--live`| Live display of speek every 1 seconds. |
+|`-f` `FILE`|`--file` `FILE`| Specify file for user info. |
+|`-t` `T_AVAIL`|`--t_avail` `T_AVAIL`| Time window width for upcomming release in {m:minutes, h:hours, d:days}. (default: 5 m) |
 
-### speek-min
 
-```sh
-speek-min
-```
+## Structure and Tag
 
-Lightweight one-shot GPU availability bars.
+### Partition usage
+|Tag|Usage|
+|-|-|
+|☠️|100%|
+|🔥|90~100%|
+|❄️|0~10%|
+|🏖️|0%|
 
-### speek-max (TUI)
-
-```sh
-speek-max [--theme THEME] [--user USER]
-```
-
-Full interactive terminal UI with tabs, themes, shell, and job management.
-
-| Key | Action |
-| --- | ------ |
-| `1`–`7` | Switch tabs (Queue, Nodes, Users, Stats, Settings, Info, Help) |
-| `d` | View job details |
-| `v` | Fold/unfold project groups |
-| `f` | Cycle focus between panels |
-| `:` | Focus the shell command bar |
-| `s` | Sort table by column |
-| `/` | Filter table rows |
-| `q` | Quit |
-
-## Documentation
-
-Full documentation is available at the [GitHub Pages site](https://edong6768.github.io/speek/):
-
-- [Installation](https://edong6768.github.io/speek/installation.html)
-- [Quick Start](https://edong6768.github.io/speek/quickstart/index.html)
-- [Themes Guide](https://edong6768.github.io/speek/guides/themes.html)
-- [Changelog](https://edong6768.github.io/speek/changelog.html)
-- [API Reference](https://edong6768.github.io/speek/api/index.html)
-
-## License
-
-MIT
+### User usage
+|Tag|Description|
+|-|-|
+|🥇🥈🥉|First~Third place based on usage|
+|🚩|Pareto line (🥇~🚩 consists 80% of usage)|
+|👑|Top user of partition|
+|⏳|Top pended user of partition|

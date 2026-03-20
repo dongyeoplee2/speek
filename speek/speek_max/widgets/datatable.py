@@ -37,14 +37,13 @@ SpeekDataTable {
     BINDINGS = [
         Binding("up,k", "cursor_up", "Cursor Up", show=False),
         Binding("down,j", "cursor_down", "Cursor Down", show=False),
-        Binding("right", "cursor_right", "Cursor Right", show=False),
+        Binding("right,l", "cursor_right", "Cursor Right", show=False),
         Binding("left,h", "cursor_left", "Cursor Left", show=False),
+        Binding("f", "toggle_fixed_columns", "Toggle Fixed Column", show=False),
         Binding("home", "scroll_home", "Home", show=False),
         Binding("end", "scroll_end", "End", show=False),
         Binding("g,ctrl+home", "scroll_top", "Top", show=False),
         Binding("G,ctrl+end", "scroll_bottom", "Bottom", show=False),
-        Binding("s", "sort_column", "Sort", show=True),
-        Binding("slash", "start_filter", "/ Filter", show=True),
     ]
 
     def __init__(self, *args: Any, **kwargs: Any):
@@ -53,11 +52,6 @@ SpeekDataTable {
         self.row_disable = False
         self.cursor_foreground_priority = "renderable"
         self.click_chain = None
-        self._sort_col: int = -1
-        self._sort_reverse: bool = False
-        self._filter_text: str = ''
-        self._filter_active: bool = False
-        self._pre_filter_data: list | None = None  # stashed rows before filtering
 
     @dataclass
     class Checkbox:
@@ -272,112 +266,6 @@ SpeekDataTable {
         if self.click_chain and isinstance(message, DataTable.RowSelected):
             message._click_chain = self.click_chain
         return super().post_message(message)
-
-    # ── Sort ────────────────────────────────────────────────────────────────
-
-    def _do_sort(self, col_idx: int) -> None:
-        """Sort by column index, toggling direction."""
-        if col_idx == self._sort_col:
-            self._sort_reverse = not self._sort_reverse
-        else:
-            self._sort_col = col_idx
-            self._sort_reverse = False
-
-        col_keys = list(self.columns.keys())
-        if col_idx >= len(col_keys):
-            return
-        col_key = col_keys[col_idx]
-
-        # Textual's sort passes the single cell value to key(), not the row tuple
-        def _sort_key(cell_value) -> str:
-            return cell_value.plain if hasattr(cell_value, 'plain') else str(cell_value)
-
-        self.sort(col_key, key=_sort_key, reverse=self._sort_reverse)
-
-    def action_sort_column(self) -> None:
-        """Sort by the column under the cursor."""
-        self._do_sort(self.cursor_coordinate.column)
-
-    @on(DataTable.HeaderSelected)
-    def _on_header_click(self, event: DataTable.HeaderSelected) -> None:
-        """Sort by clicked column header."""
-        self._do_sort(event.column_index)
-
-    # ── Filter ─────────────────────────────────────────────────────────────
-
-    def action_start_filter(self) -> None:
-        """Enter filter mode — show input for text filtering."""
-        if self._filter_active:
-            self._end_filter()
-            return
-        self._filter_active = True
-        # Stash current rows
-        self._stash_rows()
-        # Show filter via app notification prompt
-        self.app.notify('Type to filter, Esc to clear', title='Filter', timeout=3)
-        # We use on_key to capture filter text since there's no inline input in DataTable
-        self._filter_text = ''
-
-    def _stash_rows(self) -> None:
-        """Save all current row data for filtering."""
-        self._pre_filter_data = []
-        for row_key in self._row_locations:
-            try:
-                cells = self.get_row(row_key)
-                self._pre_filter_data.append((row_key, cells))
-            except Exception:
-                pass
-
-    def _apply_filter(self) -> None:
-        """Re-render table showing only rows matching filter text."""
-        if not self._pre_filter_data:
-            return
-        query = self._filter_text.lower()
-        with self.app.batch_update():
-            self.clear()
-            for row_key, cells in self._pre_filter_data:
-                if not query:
-                    self.add_row(*cells, key=str(row_key.value), explicit_by_user=False)
-                    continue
-                # Check if any cell contains the filter text
-                match = any(
-                    query in (c.plain.lower() if hasattr(c, 'plain') else str(c).lower())
-                    for c in cells
-                )
-                if match:
-                    self.add_row(*cells, key=str(row_key.value), explicit_by_user=False)
-
-    def _end_filter(self) -> None:
-        """Exit filter mode and restore all rows."""
-        self._filter_active = False
-        self._filter_text = ''
-        if self._pre_filter_data:
-            with self.app.batch_update():
-                self.clear()
-                for row_key, cells in self._pre_filter_data:
-                    self.add_row(*cells, key=str(row_key.value), explicit_by_user=False)
-        self._pre_filter_data = None
-
-    def on_key(self, event: events.Key) -> None:
-        """Handle filter input when filter mode is active."""
-        if not self._filter_active:
-            return
-        if event.key == 'escape':
-            event.prevent_default()
-            event.stop()
-            self._end_filter()
-        elif event.key == 'backspace':
-            event.prevent_default()
-            event.stop()
-            self._filter_text = self._filter_text[:-1]
-            self._apply_filter()
-            self.border_subtitle = f'/{self._filter_text}' if self._filter_text else ''
-        elif event.is_printable and event.character:
-            event.prevent_default()
-            event.stop()
-            self._filter_text += event.character
-            self._apply_filter()
-            self.border_subtitle = f'/{self._filter_text}'
 
     def __rich_repr__(self):
         yield "id", self.id

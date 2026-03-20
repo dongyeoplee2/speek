@@ -1,7 +1,7 @@
 """event_watcher.py — Background job state-change watcher.
 
-Polls squeue every 30s for the current user and refreshes the Events
-table when jobs transition states.
+Polls squeue every 30s for the current user and fires app notifications
+when jobs transition: PENDING→RUNNING, RUNNING→COMPLETED/FAILED/TIMEOUT/CANCELLED.
 """
 from __future__ import annotations
 
@@ -11,15 +11,35 @@ from typing import Dict
 from textual.app import App
 
 
+_TERMINAL = {'COMPLETED', 'FAILED', 'TIMEOUT', 'CANCELLED', 'NODE_FAIL', 'OUT_OF_MEMORY'}
+_SEVERITY = {
+    'COMPLETED': 'information',
+    'FAILED':    'error',
+    'TIMEOUT':   'error',
+    'CANCELLED': 'warning',
+    'NODE_FAIL': 'error',
+    'OUT_OF_MEMORY': 'error',
+}
+_EMOJI = {
+    'RUNNING':   '▶',
+    'COMPLETED': '✓',
+    'FAILED':    '✗',
+    'TIMEOUT':   '⏱',
+    'CANCELLED': '⊘',
+    'NODE_FAIL': '✗',
+    'OUT_OF_MEMORY': '✗',
+}
+
+
 def _parse_gpu(gres: str) -> str:
-    """Extract a short GPU label from a GRES string, e.g. 'gpu:A100-80GB:4' -> 'A100-80GBx4'."""
+    """Extract a short GPU label from a GRES string, e.g. 'gpu:A100-80GB:4' → 'A100-80GB×4'."""
     import re
     m = re.search(r'gpu:([A-Za-z0-9\-]+):(\d+)', gres, re.IGNORECASE)
     if m:
-        return f'{m.group(1)}x{m.group(2)}'
+        return f'{m.group(1)}×{m.group(2)}'
     m = re.search(r'gpu(?::([A-Za-z0-9\-]+))?:(\d+)', gres, re.IGNORECASE)
     if m:
-        return f'GPUx{m.group(2)}'
+        return f'GPU×{m.group(2)}'
     return ''
 
 
@@ -48,13 +68,14 @@ class EventWatcher:
         self._app = app
         self._user = user
         self._interval = interval
-        self._known: Dict[str, str] = {}  # job_id -> state
+        self._known: Dict[str, str] = {}  # job_id → state
         self._started = False
 
     def start(self) -> None:
         if self._started:
             return
         self._started = True
+        # Seed initial state silently
         raw = _query(self._user)
         self._known = {jid: st for jid, (st, *_) in raw.items()}
         self._app.set_interval(self._interval, self._poll)
@@ -64,30 +85,39 @@ class EventWatcher:
 
     def _check(self) -> None:
         raw = _query(self._user)
-        current = {jid: st for jid, (st, *_) in raw.items()}
-        prev_known = dict(self._known)
-        changed_jids: set[str] = set()
+        current = {jid: st  for jid, (st, *_)        in raw.items()}
+        names   = {jid: nm  for jid, (_, nm, *_)     in raw.items()}
+        gpus    = {jid: gpu for jid, (_, _, gpu, *_)  in raw.items()}
+        nodes   = {jid: nd  for jid, (_, _, _, nd)    in raw.items()}
+
+        notifications = []
 
         for jid, state in current.items():
-            prev = prev_known.get(jid)
-            if (prev is not None and prev != state) or (prev is None and state == 'RUNNING'):
-                changed_jids.add(jid)
+            prev = self._known.get(jid)
+            name = names.get(jid, jid)
+            gpu  = gpus.get(jid, '')
+            nd   = nodes.get(jid, '')
+            detail = f' [{gpu}]' if gpu else ''
+            detail += f' on {nd}' if nd and nd not in ('N/A', '(null)', '') else ''
+            if prev is None:
+                if state == 'RUNNING':
+                    notifications.append((f'{_EMOJI["RUNNING"]} {name} ({jid}) started{detail}', 'information'))
+            elif prev != state:
+                emoji = _EMOJI.get(state, '•')
+                if prev == 'PENDING' and state == 'RUNNING':
+                    notifications.append((f'{emoji} {name} ({jid}) started{detail}', 'information'))
+                elif state in _TERMINAL:
+                    sev = _SEVERITY.get(state, 'warning')
+                    notifications.append((f'{emoji} {name} ({jid}) {state.lower()}', sev))
 
-        # Jobs that disappeared (finished)
-        for jid, prev_state in prev_known.items():
-            if jid not in current and prev_state == 'RUNNING':
-                changed_jids.add(jid)
+        # Jobs that disappeared (completed but no longer in squeue)
+        for jid in list(self._known):
+            if jid not in current and self._known[jid] == 'RUNNING':
+                notifications.append((f'{_EMOJI["COMPLETED"]} Job {jid} finished', 'information'))
 
         self._known = current
 
-        if changed_jids:
-            def _refresh():
-                try:
-                    from speek.speek_max.widgets.history_widget import HistoryWidget
-                    hw = self._app.query_one(HistoryWidget)
-                    hw.mark_fresh(changed_jids)
-                    hw._load()
-                except Exception:
-                    pass
-
-            self._app.call_from_thread(_refresh)
+        for msg, sev in notifications:
+            self._app.call_from_thread(
+                lambda m=msg, s=sev: self._app.notify(m, severity=s, timeout=10)
+            )
