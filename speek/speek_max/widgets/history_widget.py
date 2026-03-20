@@ -358,6 +358,8 @@ class HistoryWidget(Widget):
         Binding('2',     'tab_read',    'Read',     show=False),
         Binding('3',     'tab_all',     'All',      show=False),
         Binding('v',     'expand_group', '▶/▼',     show=True),
+        Binding('V',     'fold_all',    '▶▶ All',  show=True),
+        Binding('S',     'toggle_all_read', '☐☐ All', show=True),
         Binding('space', 'toggle_read', '☐/☑',      show=True),
         Binding('A',     'mark_all',    'Mark all', show=True),
         Binding('a',     'full_history','All hist', show=True),
@@ -867,6 +869,33 @@ class HistoryWidget(Widget):
         self.app.push_screen(
             FullHistoryModal(self._all_groups, self._build_row, self._state_style_dict)
         )
+
+    def action_fold_all(self) -> None:
+        """Fold or unfold ALL groups. If any open, fold all. If all folded, unfold all."""
+        expandable = {g['first_jid'] for g in self._all_groups
+                      if len(self._first_to_all.get(g['first_jid'], [])) > 1}
+        if expandable - self._expanded_groups:
+            # Some are collapsed → expand all
+            self._expanded_groups |= expandable
+        else:
+            # All expanded → collapse all
+            self._expanded_groups.clear()
+        self._refresh_all_tables()
+
+    def action_toggle_all_read(self) -> None:
+        """Toggle read/unread for ALL visible events."""
+        tab = self.query_one(_HISTORY_TC, TabbedContent).active.removeprefix('tc-')
+        groups = self._filtered_groups(tab)
+        all_read = all(not self._group_is_unread(g) for g in groups)
+        for g in groups:
+            for jid in g['ids']:
+                if all_read:
+                    self._read_ids.discard(jid)
+                else:
+                    self._read_ids.add(jid)
+        _save_read_ids(self._read_ids)
+        self._refresh_all_tables()
+        self._post_counts()
 
     def action_expand_group(self) -> None:
         key = self._selected_raw_key()

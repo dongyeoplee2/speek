@@ -153,6 +153,7 @@ class MyJobsWidget(Widget):
         Binding('d',     'view_job',    'Details',  show=True),
         Binding('enter', 'view_job',   'Details',  show=False),
         Binding('v',     'toggle_fold', '▶/▼',     show=True),
+        Binding('V',     'fold_all',   '▶▶ All',  show=True),
         Binding('x',     'cancel_job', 'Cancel',   show=True),
         Binding('1',     'tab_current', '',        show=False),
         Binding('2',     'tab_history', '',        show=False),
@@ -183,9 +184,14 @@ class MyJobsWidget(Widget):
     def compose(self) -> ComposeResult:
         """Compose the my-jobs widget."""
         yield LoadingIndicator()
-        yield Static('', id='myjobs-empty', classes='empty-state')
-        yield SpeekDataTable(id='myjobs-dt', cursor_type='row', show_cursor=True)
-        yield Static('', id='myjobs-stats')
+        with TabbedContent(id='myjobs-tc', initial='tc-current'):
+            with TabPane('Current [1]', id='tc-current'):
+                yield Static('', id='myjobs-empty', classes='empty-state')
+                yield SpeekDataTable(id='myjobs-dt', cursor_type='row', show_cursor=True)
+                yield Static('', id='myjobs-stats')
+            with TabPane('History [2]', id='tc-history'):
+                yield SpeekDataTable(id='myjobs-hist-dt', cursor_type='row', show_cursor=True)
+                yield Static('', id='myjobs-hist-empty', classes='empty-state')
 
     def on_mount(self) -> None:
         self._row_keys: List[str] = []        # maps dt row index → key (proj:: or jid or ind::jid)
@@ -208,9 +214,25 @@ class MyJobsWidget(Widget):
         dt.add_column('Rank',      width=7)
         dt.add_column('IDs',       width=16)
         self._log_col = dt.add_column('Log', width=32)
+        # History tab
+        hdt = self.query_one(_MYHIST_DT, SpeekDataTable)
+        hdt.zebra_stripes = True
+        hdt.add_column('#',         width=3)
+        hdt.add_column('Name',      width=18)
+        hdt.add_column('Partition', width=10)
+        hdt.add_column('GPU',       width=6)
+        hdt.add_column('State',     width=9)
+        hdt.add_column('Elapsed',   width=9)
+        hdt.add_column('IDs',       width=16)
+        self._hist_groups: Dict[str, list] = {}
+        self._hist_collapsed: set[str] = set()
+        self._hist_row_keys: List[str] = []
+        self._last_hist_sig: str = ''
         self._load()
+        self.set_timer(3.0, self._load_history)
         interval = getattr(self.app, '_queue_refresh', 5)
         self._refresh_timer = self.set_interval(interval, self._load)
+        self.set_interval(60, self._load_history)
 
     def on_click(self, event) -> None:
         try:
@@ -523,10 +545,23 @@ class MyJobsWidget(Widget):
 
     # ── Selection helpers ──────────────────────────────────────────────────────
 
+    def _active_tab(self) -> str:
+        try:
+            return self.query_one(_MYJOBS_TC, TabbedContent).active.removeprefix('tc-')
+        except Exception:
+            return 'current'
+
     def _active_dt(self) -> SpeekDataTable:
+        if self._active_tab() == 'history':
+            try:
+                return self.query_one(_MYHIST_DT, SpeekDataTable)
+            except Exception:
+                pass
         return self.query_one(_MYJOBS_DT, SpeekDataTable)
 
     def _active_row_keys(self) -> List[str]:
+        if self._active_tab() == 'history':
+            return getattr(self, '_hist_row_keys', [])
         return self._row_keys
 
     def _selected_key(self) -> Optional[str]:
@@ -546,7 +581,7 @@ class MyJobsWidget(Widget):
         # History tab keys
         if key.startswith('hist_'):
             return key[5:]
-        if key.startswith('hproj::') or key.startswith(_HIST_DIV_PREFIX):
+        if key.startswith('hproj::') or key.startswith(_HIST_DIV_PREFIX) or key.startswith('hgrp_'):
             return None
         # Current tab keys
         if key.startswith(_IND):
@@ -593,26 +628,44 @@ class MyJobsWidget(Widget):
 
     # ── Actions ───────────────────────────────────────────────────────────────
 
-    def _active_tab(self) -> str:
-        try:
-            return self.query_one(_MYJOBS_TC, TabbedContent).active.removeprefix('tc-')
-        except Exception:
-            return 'current'
+    def action_fold_all(self) -> None:
+        """Fold or unfold ALL groups at once. If any are open, fold all. If all folded, unfold all."""
+        if self._active_tab() == 'history':
+            # Check if any are unfolded
+            all_proj_keys = [k[7:] for k in self._hist_row_keys if k.startswith('hproj::')]
+            all_grp_keys = [k for k in self._hist_row_keys if k.startswith('hgrp_')]
+            all_keys = set(all_proj_keys + all_grp_keys)
+            if all_keys - self._hist_collapsed:
+                # Some open → fold all
+                self._hist_collapsed |= all_keys
+            else:
+                # All folded → unfold all
+                self._hist_collapsed.clear()
+            self._last_hist_sig = ''
+            self._load_history()
+        else:
+            # Current tab: check projects
+            all_projs = {k[len(_PROJ):] for k in self._row_keys if k.startswith(_PROJ)}
+            if all_projs - self._collapsed:
+                self._collapsed |= all_projs
+            else:
+                self._collapsed.clear()
+            self._rebuild_from_last()
 
     def action_toggle_fold(self) -> None:
-        """Toggle fold/unfold for the selected row — works for both tabs."""
+        """Toggle fold/unfold for the selected row."""
         key = self._selected_key()
         if not key:
             return
 
-        # History tab project rows
-        if key.startswith('hproj::'):
-            proj = key[7:]
-            if proj in self._hist_collapsed:
-                self._hist_collapsed.discard(proj)
+        # History tab project rows or sub-group rows
+        if key.startswith('hproj::') or key.startswith('hgrp_'):
+            toggle_key = key[7:] if key.startswith('hproj::') else key
+            if toggle_key in self._hist_collapsed:
+                self._hist_collapsed.discard(toggle_key)
             else:
-                self._hist_collapsed.add(proj)
-            self._last_hist_sig = ''  # force re-render
+                self._hist_collapsed.add(toggle_key)
+            self._last_hist_sig = ''
             self._load_history()
             return
 
@@ -849,17 +902,76 @@ class MyJobsWidget(Widget):
                     if collapsed:
                         continue
 
-                # Individual job rows
+                # Group similar jobs within the project (two-level grouping)
+                sub_groups: list[list] = []
                 for item in items:
-                    ss = state_style.get(item['state'], c_muted)
-                    dt.add_row(
-                        Text('', style=c_muted),
-                        Text(item['name'][:18]),
-                        Text(item['part'][:10], style=c_muted),
-                        Text(item['gpu'][:6], style=c_muted),
-                        Text(item['state'][:9], style=ss),
-                        Text(item['elapsed'][:9], style=c_muted),
-                        Text(item['jid'], style=c_muted),
-                        key=f'hist_{item["jid"]}',
-                    )
-                    self._hist_row_keys.append(f'hist_{item["jid"]}')
+                    merged = False
+                    for sg in sub_groups:
+                        if sg[0]['name'] == item['name'] or (
+                            _name_base(sg[0]['name']) and _name_base(sg[0]['name']) == _name_base(item['name'])
+                        ):
+                            sg.append(item)
+                            merged = True
+                            break
+                    if not merged:
+                        sub_groups.append([item])
+
+                for sg in sub_groups:
+                    sg_n = len(sg)
+                    first = sg[0]
+
+                    if sg_n > 1:
+                        # Sub-group header
+                        sg_ok = sum(1 for i in sg if i['state'] == 'COMPLETED')
+                        sg_fail = sum(1 for i in sg if i['state'] in ('FAILED', 'TIMEOUT', 'OUT_OF_MEMORY'))
+                        sg_state = Text()
+                        if sg_ok:
+                            sg_state.append(f'{sg_ok}', style=c_muted)
+                            sg_state.append('C ', style=c_muted)
+                        if sg_fail:
+                            sg_state.append(f'{sg_fail}', style=f'bold {c_error}')
+                            sg_state.append('F', style=c_muted)
+                        sg_key = f'hgrp_{first["jid"]}'
+                        sg_collapsed = sg_key in self._hist_collapsed
+                        sg_fold = '▶' if sg_collapsed else '▼'
+                        dt.add_row(
+                            Text(f' {sg_n}', style=c_muted),
+                            Text(f'{sg_fold} {first["name"][:16]}', style=''),
+                            Text(first['part'][:10], style=c_muted),
+                            Text(first['gpu'][:6], style=c_muted),
+                            sg_state,
+                            Text('', style=c_muted),
+                            Text(f'{first["jid"]}+{sg_n-1}', style=c_muted),
+                            key=sg_key,
+                        )
+                        self._hist_row_keys.append(sg_key)
+                        if sg_collapsed:
+                            continue
+                        # Individual jobs under sub-group
+                        for item in sg:
+                            ss = state_style.get(item['state'], c_muted)
+                            dt.add_row(
+                                Text('', style=c_muted),
+                                Text(f'  {item["name"][:16]}', style=c_muted),
+                                Text(item['part'][:10], style=c_muted),
+                                Text(item['gpu'][:6], style=c_muted),
+                                Text(item['state'][:9], style=ss),
+                                Text(item['elapsed'][:9], style=c_muted),
+                                Text(item['jid'], style=c_muted),
+                                key=f'hist_{item["jid"]}',
+                            )
+                            self._hist_row_keys.append(f'hist_{item["jid"]}')
+                    else:
+                        # Single job — no sub-group header needed
+                        ss = state_style.get(first['state'], c_muted)
+                        dt.add_row(
+                            Text('', style=c_muted),
+                            Text(first['name'][:18]),
+                            Text(first['part'][:10], style=c_muted),
+                            Text(first['gpu'][:6], style=c_muted),
+                            Text(first['state'][:9], style=ss),
+                            Text(first['elapsed'][:9], style=c_muted),
+                            Text(first['jid'], style=c_muted),
+                            key=f'hist_{first["jid"]}',
+                        )
+                        self._hist_row_keys.append(f'hist_{first["jid"]}')

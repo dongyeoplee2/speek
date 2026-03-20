@@ -21,7 +21,8 @@ _JI_LOG        = '#ji-log'
 _DETAIL_PANE   = 'ji-detail-pane'
 _OUTPUT_PANE   = 'ji-output-pane'
 _GPU_PANE      = 'ji-gpu-pane'
-_PRIORITY_PANE = 'ji-priority-pane'
+_PRIORITY_PANE = 'ji-priority-pane'  # kept for compat
+_ANALYSIS_PANE = 'ji-priority-pane'  # same pane, renamed conceptually
 
 # Log highlighting — ordered least-specific → most-specific so later patterns win.
 _LOG_HIGHLIGHTS = (
@@ -120,7 +121,7 @@ class JobInfoModal(SpeekModal):
         Binding('1',        'show_detail',    'Detail',   show=True),
         Binding('2',        'show_output',    'Output',   show=True),
         Binding('3',        'show_gpu',       'GPU',      show=True),
-        Binding('4',        'show_priority',  'Priority', show=True),
+        Binding('4',        'show_priority',  'Analysis', show=True),
         Binding('g',        'fetch_gpu',      '⚡ Fetch',  show=True),
         Binding('r',        'refresh',        'Refresh',  show=True),
         Binding('l,right',  'next_job',       '→ Next',   show=True),
@@ -287,7 +288,7 @@ class JobInfoModal(SpeekModal):
                     yield Static('1\nDetail',   id='ji-tab-btn-detail',   classes='ji-tab-btn')
                     yield Static('2\nOutput',   id='ji-tab-btn-output',   classes='ji-tab-btn')
                     yield Static('3\nGPU',      id='ji-tab-btn-gpu',      classes='ji-tab-btn')
-                    yield Static('4\nPriority', id='ji-tab-btn-priority', classes='ji-tab-btn')
+                    yield Static('4\nAnalysis', id='ji-tab-btn-priority', classes='ji-tab-btn')
             yield Static('', id='ji-hint', markup=True)
 
     def on_mount(self) -> None:
@@ -295,7 +296,7 @@ class JobInfoModal(SpeekModal):
         self._update_title()
         self._update_hint()
         self._populate_modal(self._log_path, self._log_content, self._details)
-        self._load_priority(self._job_id)
+        self._load_analysis(self._job_id, self._details)
 
     def _populate_modal(
         self,
@@ -527,33 +528,161 @@ class JobInfoModal(SpeekModal):
             thread=True, group='ji-refresh',
         )
 
-    # ── Priority pane ──────────────────────────────────────────────────────────
+    # ── Analysis pane (adaptive per job state) ──────────────────────────────────
 
-    def _load_priority(self, job_id: str) -> None:
-        cmd_ok = getattr(self.app, '_cmd_squeue', True)
-        feat_ok = getattr(self.app, '_feat_priority', True)
-        if not cmd_ok or not feat_ok:
-            try:
-                self.query_one('#ji-priority-content', Static).update(
-                    '[dim]Priority disabled in Settings[/dim]'
-                )
-            except Exception:
-                pass
-            return
+    def _load_analysis(self, job_id: str, details: Dict) -> None:
+        state = (details.get('JobState', '') or details.get('State', '')).split()[0].upper()
         user = getattr(self.app, 'user', '')
 
         def _worker():
-            from speek.speek_max.slurm import fetch_priority_data
-            return fetch_priority_data(job_id, user)
+            return self._fetch_analysis(job_id, state, user, details)
 
         self.run_worker(_worker, thread=True, group='ji-priority')
 
-    def _render_priority(self, data: Dict) -> None:
-        from speek.speek_max.widgets.priority_widget import build_priority_renderable
+    @staticmethod
+    def _fetch_analysis(job_id: str, state: str, user: str, details: Dict) -> Dict:
+        """Fetch state-appropriate analysis data."""
+        result: Dict = {'state': state, 'job_id': job_id}
+
+        if state == 'PENDING':
+            # Why is it pending? Priority scores + reason
+            try:
+                from speek.speek_max.slurm import fetch_priority_data
+                result['priority'] = fetch_priority_data(job_id, user)
+            except Exception:
+                pass
+            result['reason'] = details.get('Reason', '')
+
+        elif state in ('FAILED', 'TIMEOUT', 'OUT_OF_MEMORY'):
+            # Why did it fail? Exit code, node, stderr hints
+            result['exit_code'] = details.get('ExitCode', details.get('DerivedExitCode', ''))
+            result['reason'] = details.get('Reason', '')
+            result['node'] = details.get('BatchHost', details.get('NodeList', ''))
+            result['signal'] = details.get('DerivedExitCode', '')
+            result['timelimit'] = details.get('Timelimit', details.get('TimeLimit', ''))
+            result['elapsed'] = details.get('Elapsed', details.get('RunTime', ''))
+            result['mem'] = details.get('MaxRSS', details.get('ReqMem', ''))
+
+        elif state == 'RUNNING':
+            # How is it going? Runtime, efficiency
+            result['elapsed'] = details.get('Elapsed', details.get('RunTime', ''))
+            result['timelimit'] = details.get('Timelimit', details.get('TimeLimit', ''))
+            result['node'] = details.get('BatchHost', details.get('NodeList', ''))
+            result['cpus'] = details.get('NumCPUs', details.get('AllocCPUS', ''))
+            result['mem'] = details.get('ReqMem', '')
+
+        elif state == 'COMPLETED':
+            # Summary: duration, efficiency
+            result['elapsed'] = details.get('Elapsed', details.get('RunTime', ''))
+            result['timelimit'] = details.get('Timelimit', details.get('TimeLimit', ''))
+            result['exit_code'] = details.get('ExitCode', '')
+            result['node'] = details.get('BatchHost', details.get('NodeList', ''))
+
+        elif state in ('CANCELLED',):
+            result['reason'] = details.get('Reason', '')
+            result['signal'] = details.get('DerivedExitCode', '')
+            result['elapsed'] = details.get('Elapsed', details.get('RunTime', ''))
+
+        return result
+
+    def _render_analysis(self, data: Dict) -> None:
+        from speek.speek_max._utils import tc
+        tv = self.app.theme_variables
+        c_muted = tc(tv, 'text-muted', 'bright_black')
+        c_error = tc(tv, 'text-error', 'red')
+        c_success = tc(tv, 'text-success', 'green')
+        c_warning = tc(tv, 'text-warning', 'yellow')
+
+        state = data.get('state', '')
+        lines: list[str] = []
+
+        if state == 'PENDING':
+            lines.append(f'[bold {c_warning}]── Why Pending? ──[/]')
+            reason = data.get('reason', '')
+            if reason:
+                lines.append(f'  [bold]Reason:[/bold]  {reason}')
+            else:
+                lines.append(f'  [{c_muted}]No reason reported[/]')
+            # Priority scores
+            prio = data.get('priority')
+            if prio:
+                from speek.speek_max.widgets.priority_widget import build_priority_renderable
+                try:
+                    self.query_one('#ji-priority-content', Static).update(
+                        build_priority_renderable(prio, tv)
+                    )
+                    return
+                except Exception:
+                    pass
+
+        elif state in ('FAILED', 'TIMEOUT', 'OUT_OF_MEMORY'):
+            label = {'FAILED': 'Failure', 'TIMEOUT': 'Timeout', 'OUT_OF_MEMORY': 'OOM'}
+            lines.append(f'[bold {c_error}]── {label.get(state, state)} Analysis ──[/]')
+            exit_code = data.get('exit_code', '')
+            if exit_code and exit_code != '0:0':
+                lines.append(f'  [bold]Exit code:[/bold]  [{c_error}]{exit_code}[/]')
+            reason = data.get('reason', '')
+            if reason:
+                lines.append(f'  [bold]Reason:[/bold]    {reason}')
+            node = data.get('node', '')
+            if node:
+                lines.append(f'  [bold]Node:[/bold]      {node}')
+            elapsed = data.get('elapsed', '')
+            timelimit = data.get('timelimit', '')
+            if elapsed and timelimit:
+                lines.append(f'  [bold]Runtime:[/bold]   {elapsed} / {timelimit}')
+            mem = data.get('mem', '')
+            if mem:
+                lines.append(f'  [bold]Memory:[/bold]    {mem}')
+            if state == 'TIMEOUT':
+                lines.append(f'  [{c_muted}]Job exceeded its time limit[/]')
+            elif state == 'OUT_OF_MEMORY':
+                lines.append(f'  [{c_muted}]Job exceeded memory allocation[/]')
+
+        elif state == 'RUNNING':
+            lines.append(f'[bold {c_success}]── Running Status ──[/]')
+            elapsed = data.get('elapsed', '')
+            timelimit = data.get('timelimit', '')
+            if elapsed and timelimit:
+                lines.append(f'  [bold]Runtime:[/bold]   {elapsed} / {timelimit}')
+            node = data.get('node', '')
+            if node:
+                lines.append(f'  [bold]Node:[/bold]      {node}')
+            cpus = data.get('cpus', '')
+            if cpus:
+                lines.append(f'  [bold]CPUs:[/bold]      {cpus}')
+
+        elif state == 'COMPLETED':
+            lines.append(f'[bold {c_success}]── Completed ──[/]')
+            elapsed = data.get('elapsed', '')
+            timelimit = data.get('timelimit', '')
+            if elapsed:
+                lines.append(f'  [bold]Runtime:[/bold]   {elapsed}' + (f' / {timelimit}' if timelimit else ''))
+            exit_code = data.get('exit_code', '')
+            if exit_code:
+                color = c_success if exit_code == '0:0' else c_error
+                lines.append(f'  [bold]Exit code:[/bold]  [{color}]{exit_code}[/]')
+            node = data.get('node', '')
+            if node:
+                lines.append(f'  [bold]Node:[/bold]      {node}')
+
+        elif state == 'CANCELLED':
+            lines.append(f'[bold {c_warning}]── Cancelled ──[/]')
+            reason = data.get('reason', '')
+            if reason:
+                lines.append(f'  [bold]Reason:[/bold]  {reason}')
+            elapsed = data.get('elapsed', '')
+            if elapsed:
+                lines.append(f'  [bold]Runtime:[/bold] {elapsed}')
+
+        else:
+            lines.append(f'[dim]State: {state}[/dim]')
+
+        if not lines:
+            lines.append(f'[{c_muted}]No analysis available[/]')
+
         try:
-            self.query_one('#ji-priority-content', Static).update(
-                build_priority_renderable(data, self.app.theme_variables)
-            )
+            self.query_one('#ji-priority-content', Static).update('\n'.join(lines))
         except Exception:
             pass
 
@@ -570,7 +699,7 @@ class JobInfoModal(SpeekModal):
             self._log_cursor  = cursor
             self._populate_modal(path, content, details)
             self._update_title()
-            self._load_priority(self._job_id)
+            self._load_analysis(self._job_id, details)
         elif grp == 'ji-refresh':
             details, new_text, new_cursor = event.worker.result
             self._details    = details
@@ -591,4 +720,4 @@ class JobInfoModal(SpeekModal):
         elif grp == 'ji-gpu':
             self._render_gpu(event.worker.result)
         elif grp == 'ji-priority':
-            self._render_priority(event.worker.result)
+            self._render_analysis(event.worker.result)

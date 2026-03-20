@@ -138,6 +138,12 @@ def build_cluster_renderable(
 
     def _bar(used: int, total: int, width: int = 16) -> Text:
         pct = used / total if total else 0.0
+        if pct == 0:
+            t = Text()
+            t.append('|', style=text_muted)
+            t.append(' 0% ', style=f'bold {_c_green}')
+            t.append(' ' * (width - 4) + '|', style=text_muted)
+            return t
         color = _util_color(pct)
         fg = 'black' if pct < 0.90 else 'white'
         pct_str = f'{round(pct * 100)}%'
