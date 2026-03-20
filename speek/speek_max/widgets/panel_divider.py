@@ -28,6 +28,7 @@ class PanelDivider(Widget):
         self._left_start = 0
 
     def render(self) -> str:
+        """Render the divider character."""
         return ("┃\n" * self.size.height).rstrip()
 
     def on_mouse_down(self, event: MouseDown) -> None:

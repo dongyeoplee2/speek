@@ -4,11 +4,12 @@ from __future__ import annotations
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.screen import ModalScreen
 from textual.widgets import RichLog, Static
 
+from speek.speek_max.widgets.modal_base import SpeekModal
 
-class LogModal(ModalScreen):
+
+class LogModal(SpeekModal):
     """Scrollable log tail with training/error pattern highlighting."""
 
     BINDINGS = [
@@ -50,8 +51,9 @@ class LogModal(ModalScreen):
         self._content = content
 
     def compose(self) -> ComposeResult:
+        """Compose the log modal."""
         from textual.containers import Vertical
-        with Vertical(id='log-modal-body'):
+        with Vertical(id='log-modal-body', classes='speek-popup'):
             yield Static(self._log_path, id='log-modal-path')
             yield RichLog(id='log-modal-log', highlight=False, markup=False, wrap=False)
 

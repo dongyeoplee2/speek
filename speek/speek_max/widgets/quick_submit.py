@@ -20,6 +20,7 @@ class QuickSubmitBar(Widget):
     ]
 
     def compose(self) -> ComposeResult:
+        """Compose the quick-submit form."""
         with Horizontal(id='quick-submit-inner'):
             yield Label('sbatch', id='quick-submit-label')
             yield Input(placeholder='script.sh --arg value …', id='quick-submit-input')

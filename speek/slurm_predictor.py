@@ -438,10 +438,10 @@ def _best_fit_and_effective_free(model: str) -> Tuple[int, int, List[str]]:
 # Public predictor functions
 # ==========================
 def predict_max_nonpending_gpus(gpu: str, when_str: str) -> int:
-    """
-    Best-effort max N for 'gpu' that likely won't pend now:
-      min( node_max_fit_now, effective_free_after_penalties, remaining_cap_if_known )
-    'when_str' is parsed for future extension; current model uses snapshots 'now'.
+    """Best-effort max N for 'gpu' that likely won't pend now.
+
+    Returns ``min(node_max_fit_now, effective_free_after_penalties, remaining_cap_if_known)``.
+    ``when_str`` is parsed for future extension; current model uses snapshots 'now'.
     """
     _ = _parse_when(when_str)
     node_max, effective, _parts = _best_fit_and_effective_free(gpu)
@@ -588,21 +588,18 @@ def predict_pending_job_eta(
     jobid: int,
     details: bool = False
 ):
-    """
-    Best-effort ETA for a *pending* job.
+    """Best-effort ETA for a *pending* job.
+
     Returns:
-      - eta: datetime or None
-      - info (optional): dict with simple, non-jargony fields describing the decision.
+        tuple: ``(eta, info)`` if ``details=True``, else just ``eta``.
+
     Logic:
-      1) If Slurm already provides an ETA (%S via 'squeue --start'), use it.
-      2) Else:
-         - get (partition, model, count)
-         - free_now = sum free GPUs for model in partition
-         - ahead = sum of GPU demand in PD with higher priority in same partition/model
-         - need = max(0, count - free_now + ahead)
-         - build release list from running jobs in that partition/model (%L)
-         - ETA = now + time of the 'need'-th release (if exists), else None
-      3) Apply a small reservation penalty using _auto_penalty_reservation([partition]).
+
+    1. If Slurm already provides an ETA (``%S`` via ``squeue --start``), use it.
+    2. Otherwise: get (partition, model, count), compute free GPUs, pending demand
+       ahead by priority, build a release list from running jobs, and pick the
+       ``need``-th earliest release.
+    3. Apply a small reservation penalty via ``_auto_penalty_reservation([partition])``.
     """
     info = _job_info(jobid)
     now = datetime.now()

@@ -451,10 +451,19 @@ class CommandBar(Widget):
     # ── Input handling ─────────────────────────────────────────────────────
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        """Hide stale suggestions — new ones only on Tab."""
+        """Auto-show suggestions as the user types."""
         if event.input.id != 'cmd-input':
             return
-        if self._suggestions_visible:
+        raw = event.value
+        if not raw.strip():
+            self._hide_suggestions()
+            return
+        # Pass raw value (preserve trailing space so "sbatch " triggers arg completions)
+        candidates = self._get_completions(raw)
+        # Don't show if the only match is exactly what's typed
+        if candidates and not (len(candidates) == 1 and candidates[0][0] == raw):
+            self._show_suggestions(candidates)
+        else:
             self._hide_suggestions()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:

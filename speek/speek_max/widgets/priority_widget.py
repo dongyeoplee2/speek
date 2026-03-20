@@ -32,12 +32,12 @@ def _prio_bar(
 
 
 def build_priority_renderable(data: Dict, tv: Dict[str, str]) -> Table:
-    c_primary = tc(tv, 'primary', '#C45AFF')
+    c_primary = tc(tv, 'primary', 'magenta')
     c_muted = tc(tv, 'text-muted', 'bright_black')
     c_secondary = tc(tv, 'text-secondary', 'default')
-    c_warning = tc(tv, 'text-warning', '#FFD700')
-    c_success = tc(tv, 'text-success', '#00FA9A')
-    c_error = tc(tv, 'text-error', '#FF4500')
+    c_warning = tc(tv, 'text-warning', 'yellow')
+    c_success = tc(tv, 'text-success', 'green')
+    c_error = tc(tv, 'text-error', 'red')
 
     table = Table(box=None, padding=(0, 1), show_header=False, expand=False)
     table.add_column('key', style=c_secondary, width=18, no_wrap=True)
@@ -127,6 +127,7 @@ class PriorityWidget(Widget):
         self.user = user
 
     def compose(self) -> ComposeResult:
+        """Compose the priority widget."""
         yield LoadingIndicator()
         yield Static('Select a pending job and press  e  in My Jobs to explain it.',
                      id='priority-idle', classes='empty-state')

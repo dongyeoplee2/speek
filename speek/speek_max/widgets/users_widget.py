@@ -35,10 +35,10 @@ def _fmt_avg(secs: int) -> str:
 
 def _success_color(pct: float, tv: dict) -> str:
     if pct >= 90:
-        return tc(tv, 'text-success', '#00FA9A')
+        return tc(tv, 'text-success', 'green')
     if pct >= 70:
-        return tc(tv, 'text-warning', '#FFD700')
-    return tc(tv, 'text-error', '#FF4500')
+        return tc(tv, 'text-warning', 'yellow')
+    return tc(tv, 'text-error', 'red')
 
 
 class UsersWidget(Widget):
@@ -57,6 +57,7 @@ class UsersWidget(Widget):
     lookback_days: reactive[int] = reactive(30)
 
     def compose(self) -> ComposeResult:
+        """Compose the users widget."""
         from textual.containers import Horizontal
         with Horizontal(id='users-toolbar'):
             yield Label('History:', id='users-lb-label')
@@ -113,6 +114,8 @@ class UsersWidget(Widget):
                 lbl.styles.text_style = 'none'
 
     def _load(self) -> None:
+        if not getattr(self.app, '_cmd_sacct', True):
+            return
         days = self.lookback_days
         self.run_worker(
             lambda: (fetch_user_stats(days), fetch_fairshares()),
@@ -132,10 +135,10 @@ class UsersWidget(Widget):
         tv    = self.app.theme_variables
 
         c_muted     = tc(tv, 'text-muted',    'bright_black')
-        c_primary   = tc(tv, 'primary',       '#C45AFF')
-        c_success   = tc(tv, 'text-success',  '#00FA9A')
-        c_warning   = tc(tv, 'text-warning',  '#FFD700')
-        c_error     = tc(tv, 'text-error',    '#FF4500')
+        c_primary   = tc(tv, 'primary',       'magenta')
+        c_success   = tc(tv, 'text-success',  'green')
+        c_warning   = tc(tv, 'text-warning',  'yellow')
+        c_error     = tc(tv, 'text-error',    'red')
         c_secondary = tc(tv, 'text-secondary','default')
 
         _rank_emoji = {1: '🥇', 2: '🥈', 3: '🥉'}
