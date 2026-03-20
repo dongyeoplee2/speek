@@ -6,11 +6,12 @@ from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
+from speek.speek_max.widgets.modal_base import SpeekModal
 
-class ConfirmationModal(ModalScreen[bool]):
+
+class ConfirmationModal(SpeekModal[bool]):
     DEFAULT_CSS = """
     ConfirmationModal {
         align: center middle;
@@ -65,7 +66,8 @@ class ConfirmationModal(ModalScreen[bool]):
             self.query_one(f"#{self.auto_focus}-button").focus()
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="confirmation-screen", classes="modal-body") as container:
+        """Compose the confirmation dialog."""
+        with Vertical(id="confirmation-screen", classes="modal-body speek-popup") as container:
             container.border_title = "Confirm"
             yield Static(self.message)
             with Horizontal(id="confirmation-buttons"):

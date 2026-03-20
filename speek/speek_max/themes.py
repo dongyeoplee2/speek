@@ -1,7 +1,44 @@
-"""themes.py — speek-max-2 themes, derived from speek-max."""
+"""themes.py — speek-max built-in and user themes.
+
+User themes can be added as YAML files in ~/.config/speek-max/themes/.
+YAML format:
+
+    name: my-theme
+    primary: "#61afef"
+    secondary: "#c678dd"
+    accent: "#56b6c2"
+    background: "#282c34"
+    surface: "#353b45"
+    panel: "#3e4451"
+    warning: "#d19a66"
+    error: "#e06c75"
+    success: "#98c379"
+    dark: true
+"""
 from __future__ import annotations
 
+import logging
+from pathlib import Path
+
 from textual.theme import Theme as TextualTheme
+
+try:
+    import yaml
+    _HAS_YAML = True
+except ImportError:
+    _HAS_YAML = False
+
+log = logging.getLogger(__name__)
+
+_USER_THEME_DIR = Path.home() / '.config' / 'speek-max' / 'themes'
+
+# Keys allowed in user theme YAML
+_THEME_COLOR_KEYS = frozenset({
+    'primary', 'secondary', 'background', 'surface', 'panel',
+    'warning', 'error', 'success', 'accent',
+})
+_THEME_META_KEYS = frozenset({'name', 'dark', 'author', 'description', 'homepage'})
+_THEME_VAR_PREFIX = 'var-'  # var-footer-background → variables["footer-background"]
 
 SPEEK_THEMES: dict[str, TextualTheme] = {
     "galaxy": TextualTheme(
@@ -18,9 +55,6 @@ SPEEK_THEMES: dict[str, TextualTheme] = {
         dark=True,
         variables={
             "input-cursor-background": "#C45AFF",
-            "block-cursor-background": "#3a2a5e",
-            "block-cursor-foreground": "#ffffff",
-            "block-cursor-text-style": "bold",
             "footer-background": "transparent",
         },
     ),
@@ -176,7 +210,7 @@ SPEEK_THEMES: dict[str, TextualTheme] = {
         warning="#FFBE0B",
         error="#FB5607",
         success="#06FFA5",
-        accent="#3A86FF",
+        accent="#C77DFF",
         background="#0F0A19",
         surface="#1A0F26",
         panel="#251833",
@@ -211,6 +245,118 @@ SPEEK_THEMES: dict[str, TextualTheme] = {
         },
     ),
 }
+
+# ── Register all base16 schemes ────────────────────────────────────────────────
+from speek.speek_max.color_schemes import SCHEMES, base16_to_textual
+
+for _name, _palette in SCHEMES.items():
+    if _name not in SPEEK_THEMES:
+        SPEEK_THEMES[_name] = base16_to_textual(_palette, _name)
+
+
+# ── Load user YAML themes from ~/.config/speek-max/themes/ ─────────────────────
+
+def _load_yaml_theme(path: Path) -> TextualTheme | None:
+    """Load a single YAML theme file and convert to TextualTheme.
+
+    Supported fields: name, primary, secondary, accent, background, surface, panel, etc.
+    Minimal required fields: name, primary.
+    """
+    if not _HAS_YAML:
+        return None
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+    except Exception as exc:
+        log.warning('Failed to parse theme %s: %s', path, exc)
+        return None
+
+    name = data.get('name')
+    if not name or not isinstance(name, str):
+        log.warning('Theme file %s missing "name" field', path)
+        return None
+    if 'primary' not in data:
+        log.warning('Theme file %s missing "primary" field', path)
+        return None
+
+    # Build TextualTheme kwargs
+    kwargs: dict = {'name': name, 'dark': data.get('dark', True)}
+    for key in _THEME_COLOR_KEYS:
+        if key in data and data[key] is not None:
+            kwargs[key] = str(data[key])
+
+    # Collect variables: any key starting with "var-" or nested "variables" dict
+    variables: dict[str, str] = {}
+    if isinstance(data.get('variables'), dict):
+        variables.update(data['variables'])
+    for key, val in data.items():
+        if key.startswith(_THEME_VAR_PREFIX) and val is not None:
+            variables[key[len(_THEME_VAR_PREFIX):]] = str(val)
+    if variables:
+        kwargs['variables'] = variables
+
+    try:
+        return TextualTheme(**kwargs)
+    except Exception as exc:
+        log.warning('Invalid theme in %s: %s', path, exc)
+        return None
+
+
+def load_user_themes() -> dict[str, TextualTheme]:
+    """Load all .yaml/.yml themes from ~/.config/speek-max/themes/.
+
+    Returns:
+        Dict mapping theme name to TextualTheme. Empty if dir doesn't
+        exist or pyyaml is not installed.
+    """
+    themes: dict[str, TextualTheme] = {}
+    if not _HAS_YAML or not _USER_THEME_DIR.is_dir():
+        return themes
+    for path in sorted(_USER_THEME_DIR.iterdir()):
+        if path.suffix in ('.yaml', '.yml'):
+            theme = _load_yaml_theme(path)
+            if theme:
+                themes[theme.name] = theme
+    return themes
+
+
+# Register user themes (override built-in if same name)
+for _name, _theme in load_user_themes().items():
+    SPEEK_THEMES[_name] = _theme
+
+
+# ── Patch all themes: derive neutral greys for UI chrome ───────────────────────
+
+def _to_neutral_grey(hex_color: str) -> str:
+    """Convert a hex color to a neutral grey with the same perceived brightness."""
+    h = hex_color.lstrip('#')
+    if len(h) != 6:
+        return hex_color
+    r, g, b = int(h[:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    # Perceived luminance
+    grey = int(0.299 * r + 0.587 * g + 0.114 * b)
+    return f'#{grey:02x}{grey:02x}{grey:02x}'
+
+
+for _theme in SPEEK_THEMES.values():
+    v = _theme.variables
+    _bg = _theme.background or '#1a1a1a'
+    _sf = _theme.surface or '#2a2a2a'
+    _pn = _theme.panel or '#333333'
+    # Neutral greys matching the theme's brightness but with zero saturation
+    _grey_bg = _to_neutral_grey(_bg)
+    _grey_sf = _to_neutral_grey(_sf)
+    _grey_pn = _to_neutral_grey(_pn)
+    v.setdefault('border', _grey_pn)
+    v.setdefault('border-blurred', _grey_sf)
+    v.setdefault('scrollbar', _grey_pn)
+    v.setdefault('scrollbar-background', _grey_bg)
+    v.setdefault('scrollbar-active', _grey_pn)
+    v.setdefault('scrollbar-hover', _grey_pn)
+    # Neutral chrome colors for SCSS: table headers, dropdowns, etc.
+    v.setdefault('chrome', _grey_sf)
+    v.setdefault('chrome-active', _grey_pn)
+    if v.get('footer-background') == 'transparent':
+        v['footer-background'] = _bg
 
 THEME_NAMES: list[str] = list(SPEEK_THEMES.keys())
 DEFAULT_THEME: str = "galaxy"

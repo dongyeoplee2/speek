@@ -25,6 +25,7 @@ class NodeWidget(Widget):
     ]
 
     def compose(self) -> ComposeResult:
+        """Compose the node status widget."""
         yield LoadingIndicator()
         yield Static('', id='node-empty', classes='empty-state')
         yield SpeekDataTable(id='node-dt', cursor_type='row')
@@ -44,7 +45,15 @@ class NodeWidget(Widget):
         self._load()
         if not hasattr(self, '_interval_started'):
             self._interval_started = True
-            self.set_interval(30, self._load)
+            interval = getattr(self.app, '_node_refresh', 30)
+            self._refresh_timer = self.set_interval(interval, self._load)
+
+    def set_refresh_interval(self, seconds: int) -> None:
+        try:
+            self._refresh_timer.stop()
+        except Exception:
+            pass
+        self._refresh_timer = self.set_interval(seconds, self._load)
 
     def on_click(self, event) -> None:
         try:
@@ -53,6 +62,8 @@ class NodeWidget(Widget):
             pass
 
     def _load(self) -> None:
+        if not getattr(self.app, '_cmd_scontrol', True):
+            return
         self.run_worker(self._fetch, thread=True, exclusive=True, group='nodes')
 
     def _fetch(self) -> None:
@@ -69,9 +80,9 @@ class NodeWidget(Widget):
         tv = self.app.theme_variables
         c_muted = tc(tv, 'text-muted', 'bright_black')
         c_secondary = tc(tv, 'text-secondary', 'default')
-        c_success = tc(tv, 'text-success', '#00FA9A')
-        c_warning = tc(tv, 'text-warning', '#FFD700')
-        c_error = tc(tv, 'text-error', '#FF4500')
+        c_success = tc(tv, 'text-success', 'green')
+        c_warning = tc(tv, 'text-warning', 'yellow')
+        c_error = tc(tv, 'text-error', 'red')
         state_color = {
             'idle': c_success,
             'mixed': c_warning,

@@ -1,17 +1,25 @@
-/* speek_max.scss — speek-max stylesheet */
+/* speek_max.scss — speek-max stylesheet
+ *
+ * Styling:
+ *   - $accent for UI chrome: borders, focus rings, highlights
+ *   - $primary for interactive buttons
+ *   - $background for all widget backgrounds (no transparent fallthrough)
+ *   - $border / $border-blurred for neutral chrome (derived as grey from theme)
+ *   - Textual derived colors ($accent-muted, $text-accent, etc.) for consistency
+ */
 
 /* ── Scrollbars ─────────────────────────────────────────────────────────── */
 * {
-  scrollbar-color: $primary 10%;
-  scrollbar-color-hover: $primary 80%;
-  scrollbar-color-active: $primary;
-  scrollbar-background: $surface-darken-1;
-  scrollbar-background-hover: $surface-darken-1;
-  scrollbar-background-active: $surface-darken-1;
+  scrollbar-color: $scrollbar;
+  scrollbar-color-hover: $scrollbar-hover;
+  scrollbar-color-active: $scrollbar-active;
+  scrollbar-background: $scrollbar-background;
+  scrollbar-background-hover: $scrollbar-background;
+  scrollbar-background-active: $scrollbar-background;
   scrollbar-size-vertical: 1;
 
   &:focus {
-    scrollbar-color: $primary 50%;
+    scrollbar-color: $foreground 30%;
   }
 }
 
@@ -28,16 +36,29 @@ SpeekMax {
 #app-title {
   height: 1;
   width: 1fr;
-  background: transparent;
-  color: $primary;
-  text-style: bold;
+  background: $background;
   padding: 0 1;
+
+  #app-title-left {
+    width: 1fr;
+    color: $text-primary;
+    text-style: bold;
+    background: $background;
+  }
+
+  #app-title-right {
+    width: auto;
+    text-align: right;
+    color: $text-muted;
+    background: $background;
+  }
 }
 
 /* ── Layout: fill the screen properly ──────────────────────────────────── */
 #main-layout {
   height: 1fr;
   width: 1fr;
+  background: $background;
 }
 
 #left-panel {
@@ -45,42 +66,45 @@ SpeekMax {
   height: 1fr;
   padding: 0;
   margin: 0;
+  background: $background;
 }
 
 #side-panel {
   width: 1fr;
   height: 1fr;
+  background: $background;
 }
 
 TabbedContent {
   height: 1fr;
+  background: $background;
 
   & > ContentSwitcher {
     height: 1fr;
-    background: transparent;
+    background: $background;
   }
 }
 
 TabPane {
   height: 1fr;
   padding: 0 1 0 1;
-  background: transparent;
+  background: $background;
 }
 
 /* ── Tabs ───────────────────────────────────────────────────────────────── */
 Tabs {
-  background: transparent;
+  background: $background;
   padding: 0 2;
 }
 
 Tab {
-  color: $foreground 40%;
-  background: transparent;
+  color: $text-muted;
+  background: $background;
   padding: 0 2;
 
   &.-active {
-    color: $background;
-    background: $primary;
+    color: $text-primary;
+    background: $primary-muted;
     text-style: bold;
     border: none;
   }
@@ -96,41 +120,60 @@ DataTable {
   height: 1fr;
   width: 1fr;
   padding: 0 1;
-  background: transparent;
+  background: $background;
 
   &:focus {
+    width: 1fr;
     padding: 0;
     border-left: inner $accent;
   }
 }
 
 SpeekDataTable {
+  background: $background;
+
   & > .datatable--header {
-    color: $text-success;
-    background: $surface;
+    color: $foreground;
+    background: $border-blurred;
+    text-style: bold;
   }
   & > .datatable--header-cursor {
-    color: $text;
-    background: $block-cursor-background;
+    color: $foreground;
+    background: $border;
+    text-style: bold;
+  }
+  & > .datatable--header-hover {
+    background: $border-blurred;
   }
   & > .datatable--cursor {
     background: $block-cursor-background;
     color: $block-cursor-foreground;
   }
+  & > .datatable--fixed {
+    background: $border-blurred;
+    color: $foreground;
+  }
+  & > .datatable--fixed-cursor {
+    background: $border;
+    color: $foreground;
+  }
+  & > .datatable--hover {
+    background: $border-blurred;
+  }
   &:blur {
     & > .datatable--cursor {
-      background: transparent;
+      background: $background;
     }
     & > .datatable--header-cursor {
-      color: $text-success;
-      background: $surface;
+      color: $foreground;
+      background: $border-blurred;
     }
   }
   & > .datatable--odd-row {
-    background: $surface 30%;
+    background: $background;
   }
   & > .datatable--even-row {
-    background: transparent;
+    background: $background;
   }
 }
 
@@ -140,7 +183,7 @@ Input {
   height: 1;
   border: none;
   width: 1fr;
-  background: transparent;
+  background: $background;
 
   &.-invalid {
     padding-left: 0;
@@ -160,51 +203,125 @@ Button {
   padding: 0 1;
   height: 1;
   border: none;
+  background: $background;
 
   &:disabled {
     opacity: 40%;
   }
 }
 
-/* ── Select ─────────────────────────────────────────────────────────────── */
+/* ── Select / Dropdown ─────────────────────────────────────────────────── */
 Select {
   height: 1;
   border: none;
   padding: 0;
+  background: $background;
 
-  &:focus SelectCurrent {
-    background: $block-cursor-background;
+  &:focus > SelectCurrent {
+    border: tall $border;
+    background: $border-blurred;
   }
 
   SelectCurrent {
     height: 1;
     border: none;
     padding: 0 1;
-    background: $surface;
+    background: $border-blurred;
+
+    Static#label {
+      background: $border-blurred;
+    }
+
+    .arrow {
+      background: $border-blurred;
+    }
   }
 
   & > SelectOverlay {
     padding: 0;
-    border: none;
+    border: tall $border;
+    background: $background;
+    color: $foreground;
+
+    &:focus {
+      background: $background;
+    }
+
+    & > .option-list--option {
+      background: $background;
+    }
+
+    & > .option-list--option-highlighted {
+      background: $border-blurred;
+      color: $foreground;
+    }
+
+    & > .option-list--option-hover {
+      background: $border-blurred;
+    }
   }
+}
+
+OptionList {
+  background: $background;
+
+  & > .option-list--option-highlighted {
+    background: $border-blurred;
+    color: $foreground;
+  }
+
+  & > .option-list--option-hover {
+    background: $border-blurred;
+  }
+}
+
+/* ── Label ──────────────────────────────────────────────────────────────── */
+Label {
+  background: $background;
+}
+
+/* ── Static ─────────────────────────────────────────────────────────────── */
+Static {
+  background: $background;
+}
+
+/* ── Horizontal / Vertical containers ──────────────────────────────────── */
+Horizontal {
+  background: $background;
+}
+
+Vertical {
+  background: $background;
+}
+
+VerticalScroll {
+  background: $background;
+}
+
+HorizontalScroll {
+  background: $background;
 }
 
 /* ── Footer ─────────────────────────────────────────────────────────────── */
 Footer {
   padding-left: 2;
-  background: transparent;
+  background: $background;
 }
 
 /* ── LoadingIndicator ───────────────────────────────────────────────────── */
 LoadingIndicator {
   height: 1;
-  color: $accent;
-  background: transparent;
+  color: $text-muted;
+  background: $background;
 }
 
 /* ── RichLog ────────────────────────────────────────────────────────────── */
+RichLog {
+  background: $background;
+}
+
 SpeekRichLog {
-  background: transparent;
+  background: $background;
   padding-left: 1;
   height: 1fr;
 
@@ -217,7 +334,7 @@ SpeekRichLog {
 /* ── TextArea ───────────────────────────────────────────────────────────── */
 TextArea {
   border: none;
-  background: transparent;
+  background: $background;
 
   &:focus {
     border: none;
@@ -225,14 +342,24 @@ TextArea {
   }
 }
 
+/* ── Sparkline ─────────────────────────────────────────────────────────── */
+Sparkline {
+  background: $background;
+}
+
+/* ── ContentSwitcher ───────────────────────────────────────────────────── */
+ContentSwitcher {
+  background: $background;
+}
+
 /* ── AutoComplete ───────────────────────────────────────────────────────── */
 AutoComplete {
   border-left: wide $accent;
-  background: $surface;
+  background: $background;
 
   & AutoCompleteList {
     color: $text-muted;
-    background: transparent;
+    background: $background;
   }
 
   & .autocomplete--highlight-match {
@@ -266,12 +393,22 @@ AutoComplete {
   & Label {
     width: auto;
     padding: 0 1;
+    background: $accent-muted;
   }
 }
 
 /* ── Modals ─────────────────────────────────────────────────────────────── */
 ModalScreen {
   background: black 30%;
+  align: center middle;
+}
+
+/* SpeekModal: backdrop colour controlled in modal_base.py DEFAULT_CSS */
+
+/* Drop shadow: darker right + bottom borders on popup panels */
+.speek-popup {
+  border-right: outer black 65%;
+  border-bottom: outer black 65%;
 }
 
 .modal-body {
@@ -284,6 +421,24 @@ ModalScreen {
   border-title-color: $text;
   border-title-background: $background;
   border-title-style: bold;
+}
+
+FullHistoryModal {
+  align: center middle;
+
+  #fh-body {
+    width: 90%;
+    height: 80%;
+    max-height: 80%;
+    background: $background;
+    border: wide $background-lighten-2;
+    padding: 0 1;
+  }
+
+  #fh-dt {
+    height: 1fr;
+    background: $background;
+  }
 }
 
 ConfirmationModal > Vertical {
@@ -300,6 +455,7 @@ ConfirmationModal > Vertical {
 
 /* ── .section pattern ───────────────────────────────────────────────────── */
 .section {
+  background: $background;
   border: round $accent 40%;
   border-title-color: $text-accent 50%;
   border-title-align: right;
@@ -315,8 +471,9 @@ ConfirmationModal > Vertical {
   display: none;
   height: 1fr;
   width: 1fr;
-  hatch: right $surface-lighten-1 30%;
+  hatch: right $surface-lighten-1 70%;
   color: $text-muted;
+  background: $background;
   content-align: center middle;
   text-style: italic;
 }
@@ -325,31 +482,33 @@ ConfirmationModal > Vertical {
 ClusterBar {
   height: auto;
   color: $text-primary;
-  padding: 0 3;
-  background: transparent;
-  border: round $accent 50%;
+  padding: 0 1;
+  background: $background;
+  border: round $accent 40%;
+  border-title-color: $text-accent 50%;
   border-title-align: right;
-  margin: 0 1;
+  margin: 0 0;
 
   &:focus-within {
-    border: round $accent;
+    border: round $accent 100%;
+    border-title-color: $foreground;
   }
 }
 
 /* ── Panel widgets ──────────────────────────────────────────────────────── */
 QueueWidget,
 NodeWidget,
-PriorityWidget,
-SubmitWidget {
+PriorityWidget {
   height: 1fr;
-  background: $surface 15%;
+  background: $background;
   border: round $accent 40%;
+  border-title-color: $text-accent 50%;
   border-title-align: right;
   padding: 0 1;
 
   &:focus-within {
-    border: round $primary;
-    border-title-color: $primary;
+    border: round $accent 100%;
+    border-title-color: $foreground;
     border-title-style: bold;
   }
 }
@@ -357,48 +516,111 @@ SubmitWidget {
 MyJobsWidget,
 HistoryWidget {
   height: 1fr;
-  background: $surface 15%;
+  background: $background;
   border: round $accent 40%;
+  border-title-color: $text-accent 50%;
   border-title-align: right;
   padding: 0 1;
 
   &:focus-within {
-    border: round $primary;
-    border-title-color: $primary;
+    border: round $accent 100%;
+    border-title-color: $foreground;
     border-title-style: bold;
+  }
+}
+
+HistoryWidget {
+  border-title-align: right;
+}
+
+/* ── SysInfo widget ─────────────────────────────────────────────────────── */
+SysInfoWidget {
+  height: 1fr;
+  background: $background;
+  border: round $accent 40%;
+  border-title-color: $text-accent 50%;
+  border-title-align: right;
+
+  &:focus-within {
+    border: round $accent 100%;
+    border-title-color: $foreground;
+    border-title-style: bold;
+  }
+
+  #si-content { padding: 1 2; background: $background; }
+  #si-age     { padding: 0 2; color: $text-muted; background: $background; }
+
+  .si-actions {
+    padding: 0 2;
+    background: $background;
+    Button { background: $surface; border: none; }
+    Button:hover { background: $panel; }
+  }
+}
+
+/* ── Help widget ────────────────────────────────────────────────────────── */
+HelpWidget {
+  height: 1fr;
+  background: $background;
+  border: round $accent 40%;
+  border-title-color: $text-accent 50%;
+  border-title-align: right;
+  padding: 1 2;
+  overflow-y: auto;
+
+  &:focus-within {
+    border: round $accent 100%;
+    border-title-color: $foreground;
+    border-title-style: bold;
+  }
+
+  #help-content {
+    height: auto;
+    width: 1fr;
+    background: $background;
   }
 }
 
 /* ── Config widget ──────────────────────────────────────────────────────── */
 ConfigWidget {
   height: 1fr;
-  background: $surface 15%;
+  background: $background;
   border: round $accent 40%;
+  border-title-color: $text-accent 50%;
   border-title-align: right;
   padding: 1 2;
 
   &:focus-within {
-    border: round $primary;
-    border-title-color: $primary;
+    border: round $accent 100%;
+    border-title-color: $foreground;
     border-title-style: bold;
   }
+}
+
+#config-scroll {
+  height: 1fr;
+  width: 1fr;
+  scrollbar-gutter: stable;
+  background: $background;
 }
 
 #config-content {
   height: auto;
   width: 1fr;
+  background: $background;
 }
 
 .config-section-header {
-  color: $primary;
+  color: $foreground;
   text-style: bold;
   padding: 0 0 0 0;
   margin-top: 1;
   width: 1fr;
+  background: $background;
 }
 
 .config-card {
-  background: $surface;
+  background: $background;
   border: round $accent 40%;
   padding: 0 1;
   margin-bottom: 1;
@@ -411,6 +633,7 @@ ConfigWidget {
   width: 1fr;
   padding: 0;
   align: left middle;
+  background: $background;
 }
 
 .config-label {
@@ -418,14 +641,16 @@ ConfigWidget {
   color: $text;
   padding: 0;
   height: 1;
+  background: $background;
 }
 
 .config-value {
-  color: $primary;
+  color: $foreground;
   text-style: bold;
   padding: 0;
   height: 1;
   width: auto;
+  background: $background;
 }
 
 .config-desc {
@@ -433,50 +658,204 @@ ConfigWidget {
   padding: 0 0 0 2;
   height: 1;
   width: 1fr;
+  background: $background;
 }
 
 #config-hint {
   color: $text-muted;
   padding: 1 0 0 0;
   height: auto;
+  background: $background;
 }
 
 #config-about {
   color: $text-muted;
   padding: 1 0 0 0;
   height: auto;
+  background: $background;
 }
 
-/* ── Queue stats bar ────────────────────────────────────────────────────── */
-#queue-stats {
+.config-switch {
+  width: auto;
+  height: 1;
+  margin: 0;
+  padding: 0;
+  background: $background;
+  border: none;
+}
+
+Checkbox {
+  border: none;
+  height: 1;
+  padding: 0 1 0 0;
+  background: $background;
+  color: $foreground;
+}
+
+.config-cmd {
+  color: $foreground;
+  text-style: bold;
+  background: $background;
+}
+
+.config-cmd-note {
+  color: $text-muted;
+  text-style: italic;
+  margin-bottom: 1;
+  background: $background;
+}
+
+.config-row Checkbox {
+  margin: 0;
+  height: 1;
+}
+
+/* ── Settings action buttons ───────────────────────────────────────────── */
+#settings-actions {
+  height: 1;
+  width: 1fr;
+  margin-top: 1;
+  padding: 0;
+  background: $background;
+}
+
+#settings-save-btn {
+  background: $success-muted;
+  color: $text-success;
+  text-style: bold;
+  min-width: 14;
+  height: 1;
+  border: none;
+  padding: 0 1;
+}
+
+#settings-reset-btn {
+  background: $error-muted;
+  color: $text-error;
+  min-width: 14;
+  height: 1;
+  border: none;
+  padding: 0 1;
+  margin-left: 1;
+}
+
+#settings-status {
+  width: 1fr;
   height: 1;
   padding: 0 1;
-  background: $surface 40%;
-  border-top: solid $accent 20%;
   color: $text-muted;
+  text-align: right;
+  background: $background;
+}
+
+/* ── Queue / My Jobs stats bar ──────────────────────────────────────────── */
+#queue-stats,
+#myjobs-stats {
+  height: 1;
+  padding: 0 1;
+  background: $border-blurred;
+  border-top: solid $border;
+  color: $foreground;
 }
 
 /* ── History toolbar ────────────────────────────────────────────────────── */
+#history-outer {
+  height: 1fr;
+  width: 1fr;
+  background: $background;
+}
+
 #history-toolbar {
   height: 1;
   padding: 0 1;
-  background: transparent;
-  border-bottom: solid $accent 20%;
+  background: $background;
+  border-bottom: solid $accent 40%;
 
   & Label {
     padding: 0 1;
     color: $text-muted;
     height: 1;
+    width: auto;
+    background: $background;
   }
 
   & Button {
     height: 1;
     border: none;
     padding: 0 1;
-    background: $accent-muted;
-    color: $text-accent;
-    min-width: 10;
-    dock: right;
+    background: $primary;
+    color: $text;
+    min-width: 3;
+    width: auto;
+    &:hover {
+      background: $primary-darken-1;
+    }
+  }
+
+  & #toolbar-spacer {
+    width: 1fr;
+    background: $background;
+  }
+}
+
+/* ── History toolbar read/unread buttons ────────────────────────────────── */
+#mark-all-read-btn {
+  background: $success-muted;
+  color: $text-success;
+  min-width: 12;
+}
+
+#mark-all-unread-btn {
+  background: $surface;
+  color: $foreground;
+  min-width: 12;
+}
+
+/* ── Cancel select modal ─────────────────────────────────────────────────── */
+CancelSelectModal {
+  align: center middle;
+
+  #cs-body {
+    background: $background;
+    border: wide $error;
+    border-title-color: $text-error;
+    border-title-background: $background;
+    border-title-style: bold;
+    padding: 1 2;
+    width: 60%;
+    height: auto;
+  }
+
+  #cs-hint {
+    color: $text-muted;
+    height: 1;
+    margin-bottom: 1;
+    background: $background;
+  }
+
+  #cs-input {
+    margin-top: 1;
+    background: $background;
+  }
+
+  #cs-btns {
+    height: 1;
+    margin-top: 1;
+    background: $background;
+
+    #cs-confirm {
+      background: $error-muted;
+      color: $text-error;
+      text-style: bold;
+      width: 1fr;
+    }
+
+    #cs-abort {
+      background: $surface;
+      color: $text-muted;
+      width: 1fr;
+      margin-left: 1;
+    }
   }
 }
 
@@ -484,63 +863,117 @@ ConfigWidget {
 #users-toolbar {
   height: 1;
   padding: 0 1;
-  background: transparent;
-  border-bottom: solid $accent 20%;
+  background: $background;
+  border-bottom: solid $accent 40%;
 
   & Label {
     padding: 0 1;
     color: $text-muted;
     height: 1;
+    background: $background;
   }
 }
 
-/* ── SubmitWidget compact panel ─────────────────────────────────────────── */
-SubmitWidget {
+/* ── CommandBar ─────────────────────────────────────────────────────────── */
+CommandBar {
   height: auto;
-  background: #404040 40%;
+  background: $background;
   border: none;
-  border-top: solid #606060 50%;
-  padding: 0;
+  padding: 0 1;
   margin: 0;
 }
 
-#submit-fields {
-  height: 1;
+#cmd-suggestions {
+  display: none;
+  height: auto;
+  max-height: 8;
   width: 1fr;
-  background: transparent;
+  background: $background;
+  border: round $border;
+  padding: 0;
+  color: $foreground;
+  margin-bottom: 1;
+
+  & > .option-list--option {
+    background: $background;
+    padding: 0 2;
+  }
+
+  & > .option-list--option-highlighted {
+    background: $border-blurred;
+    color: $foreground;
+    text-style: bold;
+  }
+
+  & > .option-list--option-hover {
+    background: $border-blurred;
+  }
+}
+
+#cmd-bar {
+  width: 1fr;
+  background: $background;
+  border: round $border;
+  height: 3;
   padding: 0 1;
 }
 
-.submit-lbl {
+#cmd-prompt {
+  width: 2;
+  padding: 0;
+  color: $foreground;
+  text-style: bold;
+  background: $background;
+}
+
+#cmd-input {
+  width: 1fr;
+  height: 1;
+  border: none;
+  background: $background;
+  padding: 0;
+
+  &:focus {
+    border: none;
+    padding: 0;
+  }
+}
+
+#cmd-status {
   width: auto;
   padding: 0 1;
-  color: #909090;
-  height: 1;
+  color: $text-muted;
+  background: $background;
 }
 
-#script-preview {
-  height: 1;
-  background: #303030 40%;
-  border: none;
-  border-top: solid #505050 40%;
-  padding: 0 1;
-}
-
-/* ── Submit / action buttons ────────────────────────────────────────────── */
-#submit-btn {
-  background: $success-muted;
-  color: $text-success;
-  text-style: bold;
-  min-width: 10;
+#cmd-copy-btn,
+#cmd-paste-btn {
+  min-width: 3;
+  width: 3;
   height: 1;
   border: none;
-  padding: 0 1;
+  padding: 0;
+  background: $background;
+  color: $text-muted;
+
+  &:hover {
+    color: $foreground;
+  }
 }
 
-#cancel-job-btn {
-  background: $error-muted;
-  color: $text-error;
-  min-width: 14;
+#cmd-submit-btn {
+  min-width: 3;
+  width: 3;
+  height: 1;
+  border: none;
+  padding: 0;
+  background: $background;
+  color: $foreground;
+
+  &:hover {
+    color: $foreground;
+    background: $border-blurred;
+  }
 }
 
 #confirm-button {
@@ -550,6 +983,260 @@ SubmitWidget {
 }
 
 #cancel-button {
-  background: $surface-lighten-1;
+  background: $surface;
   color: $text-muted;
+}
+
+/* ── StatsWidget ─────────────────────────────────────────────────────────── */
+StatsWidget {
+  height: 1fr;
+  background: $background;
+  border: round $accent 40%;
+  border-title-color: $text-accent 50%;
+  border-title-align: right;
+  padding: 0 1;
+
+  &:focus-within {
+    border: round $accent 100%;
+    border-title-color: $foreground;
+    border-title-style: bold;
+  }
+}
+
+#stats-toolbar {
+  height: 1;
+  width: 1fr;
+  padding: 0;
+  background: $background;
+}
+
+#stats-filter-bar,
+#stats-custom-bar {
+  height: 1;
+  width: 1fr;
+  padding: 0;
+  background: $background;
+  border-top: solid $accent 40%;
+}
+
+.stats-dim-btn {
+  height: 1;
+  border: none;
+  padding: 0 1;
+  background: $background;
+  color: $text-muted;
+  min-width: 0;
+
+  &.--active {
+    background: $primary-muted;
+    color: $text-primary;
+    text-style: bold;
+  }
+
+  &:hover {
+    background: $surface;
+    color: $foreground;
+  }
+}
+
+#stats-range-select {
+  width: 12;
+  height: 1;
+  border: none;
+  padding: 0;
+  background: $background;
+}
+
+.stats-icon-btn {
+  height: 1;
+  border: none;
+  padding: 0 1;
+  background: $background;
+  color: $text-muted;
+  min-width: 3;
+
+  &:hover {
+    color: $text-accent;
+  }
+}
+
+.stats-sep {
+  height: 1;
+  width: auto;
+  padding: 0 1;
+  color: $text-muted;
+  background: $background;
+}
+
+.stats-lbl {
+  height: 1;
+  width: auto;
+  padding: 0 1;
+  color: $text-muted;
+  background: $background;
+}
+
+#stats-toolbar-spacer {
+  width: 1fr;
+  background: $background;
+}
+
+#stats-filter-sel {
+  width: 18;
+  height: 1;
+  border: none;
+  padding: 0;
+  background: $background;
+}
+
+.stats-date-input {
+  width: 14;
+  height: 1;
+  border: none;
+  background: $surface;
+  padding: 0 1;
+}
+
+.stats-apply-btn {
+  height: 1;
+  border: none;
+  padding: 0 1;
+  background: $primary;
+  color: $text;
+  min-width: 8;
+  &:hover {
+    background: $primary-darken-1;
+  }
+}
+
+#stats-chart-area {
+  height: 1fr;
+  width: 1fr;
+  padding: 0;
+  background: $background;
+  border-top: solid $accent 40%;
+  border-bottom: solid $accent 40%;
+}
+
+#stats-chart-header {
+  height: 1;
+  background: $background;
+}
+
+#stats-chart-title {
+  width: 1fr;
+  height: 1;
+  padding: 0 1;
+  color: $text-muted;
+  background: $background;
+}
+
+#stats-y-max {
+  height: 1;
+  padding: 0 1;
+  color: $text-muted;
+  text-align: right;
+  background: $background;
+}
+
+#stats-chart-body {
+  height: 1fr;
+  background: $background;
+}
+
+#stats-y-axis {
+  width: 7;
+  height: 1fr;
+  color: $text-muted;
+  background: $background;
+}
+
+#stats-chart-inner {
+  width: 1fr;
+  height: 1fr;
+  background: $background;
+}
+
+#stats-sparkline {
+  height: 1fr;
+  min-height: 5;
+  width: 1fr;
+  background: $background;
+
+  & > .sparkline--max-color {
+    color: $success;
+  }
+  & > .sparkline--min-color {
+    color: $success 20%;
+  }
+}
+
+#stats-x-axis {
+  height: 1;
+  padding: 0 0;
+  color: $text-muted;
+  background: $background;
+}
+
+#stats-hover-info {
+  height: 1;
+  width: auto;
+  color: $text-accent;
+  background: $accent-muted;
+  text-style: bold;
+}
+
+#stats-summary {
+  height: 1;
+  width: 1fr;
+  padding: 0 1;
+  background: $background;
+}
+
+#stats-lbl-total,
+#stats-lbl-peak,
+#stats-lbl-jobs {
+  height: 1;
+  width: auto;
+  padding: 0 1 0 0;
+  background: $background;
+}
+
+#stats-lbl-loading {
+  height: 1;
+  width: 1fr;
+  padding: 0 1;
+  text-align: right;
+  color: $text-muted;
+  background: $background;
+}
+
+#stats-breakdown {
+  height: auto;
+  width: 1fr;
+  padding: 0 1;
+  background: $background;
+  border-top: solid $accent 40%;
+}
+
+#stats-issues {
+  height: auto;
+  width: 1fr;
+  background: $background;
+}
+
+#stats-issue-chart {
+  height: auto;
+  width: 1fr;
+  padding: 0 1;
+  background: $background;
+  border-top: solid $accent 40%;
+}
+
+#stats-issue-table {
+  height: auto;
+  width: 1fr;
+  padding: 0 1;
+  background: $background;
+  border-top: solid $accent 40%;
 }

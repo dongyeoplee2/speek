@@ -1,0 +1,594 @@
+"""job_info_modal.py — Combined log-output + scontrol-detail modal with job navigation."""
+from __future__ import annotations
+
+import re
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Optional
+
+from rich.table import Table as _RichTable
+from rich.text import Text
+from textual.app import ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widgets import Button, ContentSwitcher, RichLog, Static
+
+from speek.speek_max.widgets.modal_base import SpeekModal
+
+from speek.speek_max.widgets.job_detail import _build_table
+
+_GPU_RE        = re.compile(r'gres/gpu(?::([a-z0-9_-]+))?[=:](\d+)', re.IGNORECASE)
+_JI_LOG        = '#ji-log'
+_DETAIL_PANE   = 'ji-detail-pane'
+_OUTPUT_PANE   = 'ji-output-pane'
+_GPU_PANE      = 'ji-gpu-pane'
+_PRIORITY_PANE = 'ji-priority-pane'
+
+# Log highlighting — ordered least-specific → most-specific so later patterns win.
+_LOG_HIGHLIGHTS = (
+    (r'\b\d+\.?\d*(?:[eE][+-]?\d+)?\b',                                               'green'),        # numbers + sci notation
+    (r'\b0[xX][0-9A-Fa-f]+\b',                                                        'bold green'),   # hex literals
+    (r'\b\d+\.?\d*\s*[KMGTPEkmgtpe]i?[Bb](?:ytes?)?\b',                               'bold green'),   # memory sizes
+    (r'\b\d+\.?\d*(?:ns|us|ms|s|min|h)\b',                                            'green'),        # durations
+    (r'\b\d+(?:\.\d+)?%',                                                              'bold magenta'), # percentages
+    (r'\b\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\b',                                            'cyan'),         # HH:MM:SS
+    (r'\b\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)?\b',                 'bold cyan'),    # ISO datetime
+    (r'\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b',                                         'cyan'),         # IP address
+    (r'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b', 'magenta'), # UUID
+    (r'\b[A-Za-z_]\w*(?=\s*=)',                                                        'yellow'),       # key= names
+    (r'"[^"\n]*"',                                                                     'green'),        # double-quoted strings
+    (r'(?<!\w)/[\w.\-/]+',                                                             'blue'),         # file paths
+    (r'https?://\S+',                                                                  'bold blue'),    # URLs
+    (r'\b(?:true|True|TRUE|false|False|FALSE)\b',                                      'bold cyan'),    # booleans
+    (r'\b(?:null|NULL|None|nil|undefined)\b',                                          'dim'),          # null-like
+    (r'\b(?:DEBUG|TRACE|VERBOSE)\b',                                                   'dim'),          # debug levels
+    (r'\b(?:INFO|NOTICE)\b',                                                           'blue'),         # info levels
+    (r'\b(?:WARNING|WARN)\b',                                                          'bold yellow'),  # warnings
+    (r'\b(?:ERROR|FATAL|CRITICAL)\b',                                                  'bold red'),     # errors
+    (r'\b(?:SUCCESS|DONE|COMPLETED|PASSED|OK)\b',                                      'bold green'),   # success
+)
+
+
+def _highlight_log(content: Text) -> None:
+    """Apply token-level highlighting to log text in-place."""
+    for pattern, style in _LOG_HIGHLIGHTS:
+        content.highlight_regex(pattern, style)
+
+
+def _build_gpu_table(result: Dict) -> _RichTable:
+    """Render fetch_job_gpu_stats result as a Rich table."""
+    t = _RichTable(box=None, show_header=True, expand=True,
+                   padding=(0, 1), show_edge=False)
+    t.add_column('Host',    style='dim',   no_wrap=True)
+    t.add_column('IDX',     justify='right')
+    t.add_column('GPU',     style='bold',  min_width=12, no_wrap=True)
+    t.add_column('GPU%',    justify='right', min_width=5)
+    t.add_column('MEM%',    justify='right', min_width=5)
+    t.add_column('Used',    justify='right', style='cyan')
+    t.add_column('Total',   justify='right', style='dim')
+    t.add_column('°C',      justify='right')
+    t.add_column('W',       justify='right')
+
+    rows = result.get('gpu_rows', [])
+    if not rows:
+        t.add_row('(no GPU data)', '', '', '', '', '', '', '', '')
+        return t
+
+    for r in rows:
+        host, idx, name, gpu_p, mem_p, mem_used, mem_tot, temp, power = r[:9]
+        try:
+            gv = float(gpu_p)
+            gs = 'bold red' if gv > 80 else ('bold yellow' if gv > 50 else 'bold green')
+            gc = f'[{gs}]{gpu_p}%[/{gs}]'
+        except ValueError:
+            gc = f'{gpu_p}%'
+        try:
+            mv = float(mem_p)
+            ms = 'bold red' if mv > 80 else ('bold yellow' if mv > 50 else 'bold cyan')
+            mc = f'[{ms}]{mem_p}%[/{ms}]'
+        except ValueError:
+            mc = f'{mem_p}%'
+        t.add_row(host, idx, name[:18], gc, mc,
+                  f'{mem_used} MiB', f'{mem_tot} MiB', f'{temp}°C', f'{power} W')
+    return t
+
+
+def _title_from_details(job_id: str, details: Dict[str, str]) -> str:
+    parts = [f'Job {job_id}']
+    name = details.get('JobName', '')
+    if name and name != 'batch':
+        parts.append(name)
+    m = _GPU_RE.search(details.get('AllocTRES', '') or details.get('TRES', ''))
+    if m:
+        model = m.group(1) or ''
+        count = m.group(2) or '?'
+        parts.append(f'{model or "GPU"}×{count}')
+    node = details.get('NodeList', '') or details.get('BatchHost', '')
+    if node and node not in ('None', 'none', ''):
+        parts.append(node)
+    part = details.get('Partition', '')
+    if part:
+        parts.append(part)
+    return '  '.join(parts)
+
+
+class JobInfoModal(SpeekModal):
+    """Two-pane modal: scontrol detail (1) and job stdout (2), with job navigation."""
+
+    BINDINGS = [
+        Binding('escape,q', 'dismiss',        'Close',    show=True),
+        Binding('tab',      'switch_tab',     '⇥ Tab',    show=True),
+        Binding('1',        'show_detail',    'Detail',   show=True),
+        Binding('2',        'show_output',    'Output',   show=True),
+        Binding('3',        'show_gpu',       'GPU',      show=True),
+        Binding('4',        'show_priority',  'Priority', show=True),
+        Binding('g',        'fetch_gpu',      '⚡ Fetch',  show=True),
+        Binding('r',        'refresh',        'Refresh',  show=True),
+        Binding('l,right',  'next_job',       '→ Next',   show=True),
+        Binding('h,left',   'prev_job',       '← Prev',   show=True),
+        Binding('j,down',   'scroll_down',    '',         show=False),
+        Binding('k,up',     'scroll_up',      '',         show=False),
+        Binding('ctrl+d',   'page_down',      '',         show=False),
+        Binding('ctrl+u',   'page_up',        '',         show=False),
+    ]
+
+    DEFAULT_CSS = """
+    JobInfoModal {
+        align: center middle;
+    }
+    #ji-body {
+        width: 90%;
+        height: 85%;
+        background: $background;
+        border: wide $accent;
+        border-title-color: $background;
+        border-title-background: $accent;
+        border-title-style: bold;
+        padding: 0;
+    }
+    #ji-main {
+        height: 1fr;
+    }
+    #ji-switcher {
+        width: 1fr;
+        height: 1fr;
+    }
+    #ji-detail-pane {
+        height: 1fr;
+        background: transparent;
+        padding: 1 2;
+    }
+    #ji-detail {
+        height: auto;
+        width: 1fr;
+    }
+    #ji-output-pane {
+        height: 1fr;
+        background: transparent;
+    }
+    #ji-log-path {
+        height: 1;
+        padding: 0 1;
+        color: $text-muted;
+        background: $surface;
+        text-style: italic;
+    }
+    #ji-log {
+        height: 1fr;
+        background: transparent;
+        padding: 0 1;
+    }
+    #ji-tab-sidebar {
+        width: 10;
+        height: 1fr;
+        border-left: tall $panel;
+        background: $panel;
+        padding: 1 0;
+        align-horizontal: center;
+    }
+    .ji-tab-btn {
+        height: 4;
+        width: 1fr;
+        padding: 1;
+        text-align: center;
+        color: $text-muted;
+    }
+    .ji-tab-btn.--active {
+        color: $primary;
+        text-style: bold;
+        background: $surface;
+        border-left: wide $accent;
+    }
+    #ji-gpu-pane {
+        height: 1fr;
+        background: transparent;
+    }
+    #ji-gpu-toolbar {
+        height: 1;
+        padding: 0 1;
+        background: $surface;
+    }
+    #ji-gpu-fetch-btn {
+        height: 1;
+        border: none;
+        padding: 0 1;
+        background: $accent-muted;
+        color: $text-accent;
+        min-width: 14;
+    }
+    #ji-gpu-status {
+        height: 1;
+        width: 1fr;
+        padding: 0 1;
+        color: $text-muted;
+    }
+    #ji-gpu-scroll {
+        height: 1fr;
+        padding: 0 1;
+        background: transparent;
+    }
+    #ji-priority-pane {
+        height: 1fr;
+        background: transparent;
+        padding: 1 2;
+    }
+    #ji-priority-content {
+        height: auto;
+        width: 1fr;
+    }
+    #ji-hint {
+        height: 1;
+        padding: 0 1;
+        color: $text-muted;
+        background: $surface;
+        text-align: right;
+    }
+    """
+
+    def __init__(
+        self,
+        job_id: str,
+        log_path: Optional[str],
+        log_content: Optional[Text],
+        details: Optional[Dict[str, str]],
+        job_ids: Optional[List[str]] = None,
+        current_idx: int = 0,
+        initial_pane: str = _DETAIL_PANE,
+    ) -> None:
+        super().__init__()
+        self._job_id       = job_id
+        self._log_path     = log_path or ''
+        self._log_content  = log_content
+        self._details      = details or {}
+        self._job_ids      = job_ids or [job_id]
+        self._idx          = current_idx
+        self._log_cursor   = 0   # byte offset; 0 = not yet loaded incrementally
+        self._initial_pane = initial_pane
+
+    def compose(self) -> ComposeResult:
+        """Compose the modal."""
+        with Vertical(id='ji-body', classes='speek-popup'):
+            with Horizontal(id='ji-main'):
+                with ContentSwitcher(id='ji-switcher', initial=_DETAIL_PANE):
+                    with VerticalScroll(id=_DETAIL_PANE):
+                        yield Static(id='ji-detail')
+                    with Vertical(id=_OUTPUT_PANE):
+                        yield Static(self._log_path, id='ji-log-path')
+                        yield RichLog(id='ji-log', highlight=False, markup=False, wrap=False)
+                    with Vertical(id=_GPU_PANE):
+                        with Horizontal(id='ji-gpu-toolbar'):
+                            yield Button('▶ Fetch  g', id='ji-gpu-fetch-btn')
+                            yield Static('', id='ji-gpu-status', markup=True)
+                        with VerticalScroll(id='ji-gpu-scroll'):
+                            yield Static('Press [bold]g[/bold] to fetch live GPU stats.',
+                                         id='ji-gpu-result', markup=True)
+                    with VerticalScroll(id=_PRIORITY_PANE):
+                        yield Static(id='ji-priority-content')
+                with Vertical(id='ji-tab-sidebar'):
+                    yield Static('1\nDetail',   id='ji-tab-btn-detail',   classes='ji-tab-btn')
+                    yield Static('2\nOutput',   id='ji-tab-btn-output',   classes='ji-tab-btn')
+                    yield Static('3\nGPU',      id='ji-tab-btn-gpu',      classes='ji-tab-btn')
+                    yield Static('4\nPriority', id='ji-tab-btn-priority', classes='ji-tab-btn')
+            yield Static('', id='ji-hint', markup=True)
+
+    def on_mount(self) -> None:
+        self._set_active_tab(self._initial_pane)
+        self._update_title()
+        self._update_hint()
+        self._populate_modal(self._log_path, self._log_content, self._details)
+        self._load_priority(self._job_id)
+
+    def _populate_modal(
+        self,
+        log_path: str,
+        log_content: Optional[Text],
+        details: Dict[str, str],
+    ) -> None:
+        tv = self.app.theme_variables
+        self.query_one('#ji-log-path', Static).update(log_path)
+        log = self.query_one(_JI_LOG, RichLog)
+        log.clear()
+        if log_content is not None:
+            _highlight_log(log_content)
+            log.write(log_content)
+        else:
+            log.write(Text('No log available', style='dim'))
+        self.query_one('#ji-detail', Static).update(_build_table(details, tv))
+
+    def _update_title(self) -> None:
+        title = _title_from_details(self._job_id, self._details)
+        n = len(self._job_ids)
+        if n > 1:
+            title = f'[{self._idx + 1}/{n}]  {title}'
+        self.query_one('#ji-body').border_title = title
+
+    def _update_hint(self) -> None:
+        n   = len(self._job_ids)
+        nav = '[bold]h/l[/] job  ' if n > 1 else ''
+        hint = (f'{nav}[bold]j/k[/] scroll  [bold]1/2/3/4[/] pane  '
+                '[bold]g[/] fetch GPU  [bold]r[/] refresh  [bold]⇥[/] switch  [bold]q[/] close')
+        self.query_one('#ji-hint', Static).update(hint)
+
+    # ── Tab helpers ────────────────────────────────────────────────────────────
+
+    _PANE_CYCLE = (_DETAIL_PANE, _OUTPUT_PANE, _GPU_PANE, _PRIORITY_PANE)
+
+    def _set_active_tab(self, pane_id: str) -> None:
+        self.query_one('#ji-switcher', ContentSwitcher).current = pane_id
+        self.query_one('#ji-tab-btn-detail').set_class(pane_id == _DETAIL_PANE,   '--active')
+        self.query_one('#ji-tab-btn-output').set_class(pane_id == _OUTPUT_PANE,   '--active')
+        self.query_one('#ji-tab-btn-gpu').set_class(pane_id == _GPU_PANE,         '--active')
+        self.query_one('#ji-tab-btn-priority').set_class(pane_id == _PRIORITY_PANE, '--active')
+
+    def _active_pane(self) -> str:
+        return self.query_one('#ji-switcher', ContentSwitcher).current or _DETAIL_PANE
+
+    def action_switch_tab(self) -> None:
+        cur = self._active_pane()
+        nxt = self._PANE_CYCLE[(self._PANE_CYCLE.index(cur) + 1) % len(self._PANE_CYCLE)]
+        self._set_active_tab(nxt)
+
+    def action_show_detail(self) -> None:
+        self._set_active_tab(_DETAIL_PANE)
+
+    def action_show_output(self) -> None:
+        self._set_active_tab(_OUTPUT_PANE)
+
+    def action_show_gpu(self) -> None:
+        self._set_active_tab(_GPU_PANE)
+
+    def action_show_priority(self) -> None:
+        self._set_active_tab(_PRIORITY_PANE)
+
+    # ── Sidebar click ─────────────────────────────────────────────────────────
+
+    _TAB_BTN_MAP = {
+        'ji-tab-btn-detail':   _DETAIL_PANE,
+        'ji-tab-btn-output':   _OUTPUT_PANE,
+        'ji-tab-btn-gpu':      _GPU_PANE,
+        'ji-tab-btn-priority': _PRIORITY_PANE,
+    }
+
+    def on_click(self, event) -> None:
+        for node in event.widget.ancestors_with_self:
+            if node.id in self._TAB_BTN_MAP:
+                self._set_active_tab(self._TAB_BTN_MAP[node.id])
+                event.stop()
+                return
+
+    # ── Fetch GPU ──────────────────────────────────────────────────────────────
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == 'ji-gpu-fetch-btn':
+            self.action_fetch_gpu()
+
+    def action_fetch_gpu(self) -> None:
+        self._set_active_tab(_GPU_PANE)
+        try:
+            self.query_one('#ji-gpu-status', Static).update('[dim]fetching…[/dim]')
+            self.query_one('#ji-gpu-result', Static).update('')
+        except Exception:
+            pass
+        job_id   = self._job_id
+        nodelist = self._details.get('NodeList', '') or self._details.get('BatchHost', '')
+
+        def _worker():
+            from speek.speek_max.slurm import fetch_job_gpu_stats
+            return fetch_job_gpu_stats(job_id, nodelist)
+
+        self.run_worker(_worker, thread=True, group='ji-gpu')
+
+    # ── Scroll ─────────────────────────────────────────────────────────────────
+
+    def _scroll_target(self):
+        pane = self._active_pane()
+        if pane == _OUTPUT_PANE:
+            return self.query_one(_JI_LOG, RichLog)
+        if pane == _GPU_PANE:
+            return self.query_one('#ji-gpu-scroll', VerticalScroll)
+        if pane == _PRIORITY_PANE:
+            return self.query_one('#' + _PRIORITY_PANE, VerticalScroll)
+        return self.query_one('#' + _DETAIL_PANE, VerticalScroll)
+
+    def action_scroll_down(self) -> None:
+        self._scroll_target().scroll_down(animate=False)
+
+    def action_scroll_up(self) -> None:
+        self._scroll_target().scroll_up(animate=False)
+
+    def action_page_down(self) -> None:
+        self._scroll_target().scroll_page_down(animate=False)
+
+    def action_page_up(self) -> None:
+        self._scroll_target().scroll_page_up(animate=False)
+
+    # ── Job navigation ─────────────────────────────────────────────────────────
+
+    def action_next_job(self) -> None:
+        if self._idx < len(self._job_ids) - 1:
+            self._idx += 1
+            self._load_job(self._job_ids[self._idx])
+
+    def action_prev_job(self) -> None:
+        if self._idx > 0:
+            self._idx -= 1
+            self._load_job(self._job_ids[self._idx])
+
+    def _load_job(self, job_id: str) -> None:
+        self._job_id     = job_id
+        self._log_cursor = 0
+        self._update_hint()
+        log = self.query_one(_JI_LOG, RichLog)
+        log.clear()
+        log.write(Text('Loading…', style='dim'))
+        self.query_one('#ji-detail', Static).update('')
+        n = len(self._job_ids)
+        self.query_one('#ji-body').border_title = f'[{self._idx + 1}/{n}]  Job {job_id}  loading…'
+        sacct_ok = (getattr(self.app, '_cmd_sacct', True)
+                    and getattr(self.app, '_feat_sacct_details', True))
+        self.run_worker(
+            lambda jid=job_id, sa=sacct_ok: self._fetch(jid, sa),
+            thread=True, group='ji-nav',
+        )
+
+    @staticmethod
+    def _fetch(job_id: str, sacct_fallback: bool = True):
+        """Single scontrol call → details + log path; log tail read concurrently."""
+        from speek.speek_max.slurm import fetch_job_details_and_log_path
+        from speek.speek_max.log_scan import scan_log_incremental
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            # scontrol (details + log path) and an eager log-size probe run together.
+            # The log read proper waits for the path, but the scontrol result is
+            # cached so the second implicit call inside scan_log_incremental is free.
+            details_fut = pool.submit(fetch_job_details_and_log_path, job_id, sacct_fallback)
+            details, path = details_fut.result()
+            # Now read the log tail while details are already in hand.
+            content_fut = pool.submit(scan_log_incremental, path, 0, 500) if path else None
+            if content_fut:
+                content, cursor = content_fut.result()
+            else:
+                content, cursor = None, 0
+
+        return path or '', content, details or {}, cursor
+
+    @staticmethod
+    def _fetch_incremental(job_id: str, log_path: str, cursor: int):
+        """Refresh the same job: scontrol (cached) + only new log bytes."""
+        from speek.speek_max.slurm import fetch_job_details
+        from speek.speek_max.log_scan import scan_log_incremental
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            details_fut = pool.submit(fetch_job_details, job_id)
+            log_fut     = pool.submit(scan_log_incremental, log_path, cursor, 0) if log_path else None
+            details = details_fut.result()
+            if log_fut:
+                new_text, new_cursor = log_fut.result()
+            else:
+                new_text, new_cursor = None, cursor
+
+        return details or {}, new_text, new_cursor
+
+    def _render_gpu(self, result: Dict) -> None:
+        """Update the GPU pane with fetch_job_gpu_stats result."""
+        from datetime import datetime
+        ts     = datetime.now().strftime('%H:%M:%S')
+        err    = result.get('error')
+        sstat  = result.get('sstat', {})
+        status = f'[dim]fetched {ts}[/dim]'
+        if err:
+            status += f'  [yellow]{err}[/yellow]'
+        try:
+            self.query_one('#ji-gpu-status', Static).update(status)
+            self.query_one('#ji-gpu-result', Static).update(_build_gpu_table(result))
+        except Exception:
+            pass
+        if sstat:
+            parts = '  '.join(
+                f'[dim]{k}[/dim] [bold]{v}[/bold]'
+                for k, v in sstat.items() if v
+            )
+            try:
+                scroll = self.query_one('#ji-gpu-scroll', VerticalScroll)
+                existing = scroll.query('#ji-gpu-sstat')
+                if existing:
+                    existing.first(Static).update(parts)
+                else:
+                    scroll.mount(Static(parts, id='ji-gpu-sstat', markup=True))
+            except Exception:
+                pass
+
+    def action_refresh(self) -> None:
+        """Refresh details and append only new log bytes (incremental)."""
+        job_id   = self._job_id
+        log_path = self._log_path
+        cursor   = self._log_cursor
+        self.run_worker(
+            lambda: self._fetch_incremental(job_id, log_path, cursor),
+            thread=True, group='ji-refresh',
+        )
+
+    # ── Priority pane ──────────────────────────────────────────────────────────
+
+    def _load_priority(self, job_id: str) -> None:
+        cmd_ok = getattr(self.app, '_cmd_squeue', True)
+        feat_ok = getattr(self.app, '_feat_priority', True)
+        if not cmd_ok or not feat_ok:
+            try:
+                self.query_one('#ji-priority-content', Static).update(
+                    '[dim]Priority disabled in Settings[/dim]'
+                )
+            except Exception:
+                pass
+            return
+        user = getattr(self.app, 'user', '')
+
+        def _worker():
+            from speek.speek_max.slurm import fetch_priority_data
+            return fetch_priority_data(job_id, user)
+
+        self.run_worker(_worker, thread=True, group='ji-priority')
+
+    def _render_priority(self, data: Dict) -> None:
+        from speek.speek_max.widgets.priority_widget import build_priority_renderable
+        try:
+            self.query_one('#ji-priority-content', Static).update(
+                build_priority_renderable(data, self.app.theme_variables)
+            )
+        except Exception:
+            pass
+
+    def on_worker_state_changed(self, event) -> None:
+        from textual.worker import WorkerState
+        if event.state != WorkerState.SUCCESS:
+            return
+        grp = event.worker.group
+        if grp == 'ji-nav':
+            path, content, details, cursor = event.worker.result
+            self._log_path    = path
+            self._log_content = content
+            self._details     = details
+            self._log_cursor  = cursor
+            self._populate_modal(path, content, details)
+            self._update_title()
+            self._load_priority(self._job_id)
+        elif grp == 'ji-refresh':
+            details, new_text, new_cursor = event.worker.result
+            self._details    = details
+            self._log_cursor = new_cursor
+            self._update_title()
+            # Append only new log lines (no clear)
+            if new_text and new_text.plain:
+                try:
+                    self.query_one(_JI_LOG, RichLog).write(new_text)
+                except Exception:
+                    pass
+            # Always refresh the detail pane
+            try:
+                tv = self.app.theme_variables
+                self.query_one('#ji-detail', Static).update(_build_table(details, tv))
+            except Exception:
+                pass
+        elif grp == 'ji-gpu':
+            self._render_gpu(event.worker.result)
+        elif grp == 'ji-priority':
+            self._render_priority(event.worker.result)
