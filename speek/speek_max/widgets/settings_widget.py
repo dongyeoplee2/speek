@@ -54,7 +54,7 @@ class SettingsWidget(Widget):
         with VerticalScroll(id='config-scroll'):
             with Vertical(id='config-content'):
                 # ── Appearance ────────────────────────────────────────
-                yield Label('Appearance', classes='config-section-header')
+                yield Label('── Appearance ──', classes='config-section-header')
                 with Vertical(classes='config-card'):
                     with Horizontal(classes='config-row'):
                         yield Label('Theme', classes='config-label')
@@ -69,7 +69,7 @@ class SettingsWidget(Widget):
                         yield Static('', id='config-hint', classes='config-desc')
 
                 # ── SLURM Commands ────────────────────────────────────
-                yield Label('SLURM Commands', classes='config-section-header')
+                yield Label('── SLURM Commands ──', classes='config-section-header')
                 with Vertical(classes='config-card'):
                     yield Static(
                         'Disable a command to turn off all features that rely on it.',
@@ -83,7 +83,7 @@ class SettingsWidget(Widget):
                             yield Static(desc, classes='config-desc')
 
                 # ── Fine Controls ─────────────────────────────────────
-                yield Label('Fine Controls', classes='config-section-header')
+                yield Label('── Fine Controls ──', classes='config-section-header')
                 with Vertical(classes='config-card'):
                     yield Static(
                         'Disable individual features within an enabled command.',
@@ -97,7 +97,7 @@ class SettingsWidget(Widget):
                             yield Static(desc, classes='config-desc')
 
                 # ── Performance ───────────────────────────────────────
-                yield Label('Performance', classes='config-section-header')
+                yield Label('── Performance ──', classes='config-section-header')
                 with Vertical(classes='config-card'):
                     with Horizontal(classes='config-row'):
                         yield Label('Queue refresh', classes='config-label')
@@ -130,7 +130,7 @@ class SettingsWidget(Widget):
                         yield Static('days of history to show', classes='config-desc')
 
                 # ── Stats ─────────────────────────────────────────────
-                yield Label('Stats', classes='config-section-header')
+                yield Label('── Stats ──', classes='config-section-header')
                 with Vertical(classes='config-card'):
                     with Horizontal(classes='config-row'):
                         yield Label('Issue lookback', classes='config-label')
@@ -144,7 +144,7 @@ class SettingsWidget(Widget):
                         yield Static('hours to scan for failed/timeout/OOM', classes='config-desc')
 
                 # ── Display ───────────────────────────────────────────
-                yield Label('Display', classes='config-section-header')
+                yield Label('── Display ──', classes='config-section-header')
                 with Vertical(classes='config-card'):
                     with Horizontal(classes='config-row'):
                         yield Label('Time format', classes='config-label')
@@ -157,7 +157,7 @@ class SettingsWidget(Widget):
                         yield Static('how to show timestamps in tables', classes='config-desc')
 
                 # ── Storage ───────────────────────────────────────────
-                yield Label('Storage', classes='config-section-header')
+                yield Label('── Storage ──', classes='config-section-header')
                 with Vertical(classes='config-card'):
                     with Horizontal(classes='config-row'):
                         yield Label('Max read IDs', classes='config-label')
@@ -170,7 +170,7 @@ class SettingsWidget(Widget):
                         yield Static('max tracked read/unread job IDs', classes='config-desc')
 
                 # ── Highlights ────────────────────────────────────────
-                yield Label('Highlights', classes='config-section-header')
+                yield Label('── Highlights ──', classes='config-section-header')
                 with Vertical(classes='config-card'):
                     with Horizontal(classes='config-row'):
                         yield Label('Cell ping', classes='config-label')
@@ -192,14 +192,14 @@ class SettingsWidget(Widget):
                         yield Static('duration for new event row highlight', classes='config-desc')
 
                 # ── Session ───────────────────────────────────────────
-                yield Label('Session', classes='config-section-header')
+                yield Label('── Session ──', classes='config-section-header')
                 with Vertical(classes='config-card'):
                     with Horizontal(classes='config-row'):
                         yield Label('User', classes='config-label')
                         yield Static('', id='config-user', classes='config-value')
 
                 # ── About ─────────────────────────────────────────────
-                yield Label('About', classes='config-section-header')
+                yield Label('── About ──', classes='config-section-header')
                 with Vertical(classes='config-card'):
                     with Horizontal(classes='config-row'):
                         yield Label('speek-max', classes='config-label')

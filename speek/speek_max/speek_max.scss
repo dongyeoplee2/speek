@@ -465,7 +465,7 @@ ConfirmationModal > Vertical {
   background: $background;
   border: round $accent 40%;
   border-title-color: $text-accent 50%;
-  border-title-align: right;
+  border-title-align: left;
 
   &:focus-within {
     border: round $accent 100%;
@@ -493,7 +493,7 @@ ClusterBar {
   background: $background;
   border: round $accent 40%;
   border-title-color: $text-accent 50%;
-  border-title-align: right;
+  border-title-align: left;
   margin: 0 0;
 
   &:focus-within {
@@ -510,7 +510,7 @@ PriorityWidget {
   background: $background;
   border: round $accent 40%;
   border-title-color: $text-accent 50%;
-  border-title-align: right;
+  border-title-align: left;
   padding: 0 1;
 
   &:focus-within {
@@ -526,7 +526,7 @@ HistoryWidget {
   background: $background;
   border: round $accent 40%;
   border-title-color: $text-accent 50%;
-  border-title-align: right;
+  border-title-align: left;
   padding: 0 1;
 
   &:focus-within {
@@ -537,7 +537,7 @@ HistoryWidget {
 }
 
 HistoryWidget {
-  border-title-align: right;
+  border-title-align: left;
 }
 
 .history-empty {
@@ -549,22 +549,26 @@ HistoryWidget {
 }
 
 /* ── SysInfo widget ─────────────────────────────────────────────────────── */
-SysInfoWidget {
+/* ── Info / Help / Settings — shared layout, unique colors ───────────── */
+SysInfoWidget, HelpWidget, SettingsWidget {
   height: 1fr;
   background: $background;
-  border: round $accent 40%;
-  border-title-color: $text-accent 50%;
-  border-title-align: right;
+  border-title-align: left;
+  padding: 1 2;
+  overflow-y: auto;
 
   &:focus-within {
-    border: round $accent 100%;
     border-title-color: $foreground;
     border-title-style: bold;
   }
+}
 
-  #si-content { padding: 1 2; background: $background; }
+SysInfoWidget {
+  border: round $primary 40%;
+  border-title-color: $primary 80%;
+  &:focus-within { border: round $primary 100%; }
+
   #si-age     { padding: 0 2; color: $text-muted; background: $background; }
-
   .si-actions {
     padding: 0 2;
     background: $background;
@@ -573,43 +577,39 @@ SysInfoWidget {
   }
 }
 
-/* ── Help widget ────────────────────────────────────────────────────────── */
 HelpWidget {
-  height: 1fr;
-  background: $background;
-  border: round $accent 40%;
-  border-title-color: $text-accent 50%;
-  border-title-align: right;
-  padding: 1 2;
-  overflow-y: auto;
-
-  &:focus-within {
-    border: round $accent 100%;
-    border-title-color: $foreground;
-    border-title-style: bold;
-  }
+  border: round $success 40%;
+  border-title-color: $success 80%;
+  &:focus-within { border: round $success 100%; }
 
   #help-content {
-    height: auto;
+    height: 1fr;
     width: 1fr;
     background: $background;
   }
+
+  .help-section-header {
+    color: $success;
+    text-style: bold;
+    margin-top: 1;
+    width: 1fr;
+    background: $background;
+  }
+
+  .help-card {
+    background: $background;
+    border: round $accent 40%;
+    padding: 0 1;
+    margin-bottom: 1;
+    width: 1fr;
+    height: auto;
+  }
 }
 
-/* ── Config widget ──────────────────────────────────────────────────────── */
-ConfigWidget {
-  height: 1fr;
-  background: $background;
-  border: round $accent 40%;
-  border-title-color: $text-accent 50%;
-  border-title-align: right;
-  padding: 1 2;
-
-  &:focus-within {
-    border: round $accent 100%;
-    border-title-color: $foreground;
-    border-title-style: bold;
-  }
+SettingsWidget {
+  border: round $warning 40%;
+  border-title-color: $warning 80%;
+  &:focus-within { border: round $warning 100%; }
 }
 
 #config-scroll {
@@ -626,7 +626,7 @@ ConfigWidget {
 }
 
 .config-section-header {
-  color: $foreground;
+  color: $warning;
   text-style: bold;
   padding: 0 0 0 0;
   margin-top: 1;
@@ -1008,7 +1008,7 @@ StatsWidget {
   background: $background;
   border: round $accent 40%;
   border-title-color: $text-accent 50%;
-  border-title-align: right;
+  border-title-align: left;
   padding: 0 1;
 
   &:focus-within {
@@ -1226,12 +1226,30 @@ StatsWidget {
   background: $background;
 }
 
-#stats-breakdown {
+#stats-breakdown-scroll {
+  height: 1fr;
+  width: 1fr;
+  background: $background;
+  border-top: solid $accent 40%;
+}
+
+.stats-group-row {
   height: auto;
+  min-height: 5;
   width: 1fr;
   padding: 0 1;
   background: $background;
-  border-top: solid $accent 40%;
+  border-bottom: dashed $border-blurred;
+
+  Static {
+    height: 1;
+    width: 1fr;
+  }
+
+  Sparkline {
+    height: 3;
+    width: 1fr;
+  }
 }
 
 #stats-issues {

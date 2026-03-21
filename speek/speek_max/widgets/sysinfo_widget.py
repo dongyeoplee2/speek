@@ -1,16 +1,26 @@
 """sysinfo_widget.py — System Info tab: SLURM capability probe results."""
 from __future__ import annotations
 
-import os
 import time
 from pathlib import Path
-from typing import List, Tuple
 
+from rich.table import Table as RichTable
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.widget import Widget
 from textual.widgets import Button, Label, Static
+
+
+def _kv_table(rows: list, key_width: int = 14) -> RichTable:
+    """Build an invisible two-column table for key-value pairs."""
+    t = RichTable(show_header=False, show_edge=False, box=None,
+                  pad_edge=False, padding=(0, 1, 0, 0))
+    t.add_column('key', style='dim', no_wrap=True, min_width=key_width, ratio=1)
+    t.add_column('val', ratio=3)
+    for k, v in rows:
+        t.add_row(k, v)
+    return t
 
 # All cache/config files speek-max uses
 _CACHE_FILES: list[tuple[str, str]] = [
@@ -100,33 +110,36 @@ class SysInfoWidget(Widget):
     ]
 
     DEFAULT_CSS = """
-    SysInfoWidget {
-        height: 1fr;
-        border: tall $accent;
-        border-title-color: $background;
-        border-title-background: $accent;
-        border-title-style: bold;
-        padding: 0;
-    }
     SysInfoWidget VerticalScroll { height: 1fr; padding: 0 1; }
 
-    .si-section-title {
-        color: $accent;
+    .si-section-header {
+        color: $primary;
         text-style: bold;
         margin-top: 1;
+        width: 1fr;
+        background: $background;
     }
-    .si-row { height: 1; }
-    .si-note { color: $text-muted; text-style: italic; height: auto; }
-    .si-kv   { height: 1; }
+    .si-card {
+        background: $background;
+        border: round $accent 40%;
+        padding: 0 1;
+        margin-bottom: 1;
+        width: 1fr;
+        height: auto;
+    }
     .si-actions { height: 3; margin-top: 1; align: left middle; }
     .si-actions Button { min-width: 22; height: 1; border: none; }
     .si-age  { color: $text-muted; height: 1; }
     """
 
+    _SI_SECTIONS = ['cluster', 'gpu', 'commands', 'sacct', 'missing', 'cache']
+
     def compose(self) -> ComposeResult:
         with VerticalScroll():
-            yield Static('', id='si-content', markup=True)
-            yield Static('', id='si-cache-info', markup=True)
+            for sec in self._SI_SECTIONS:
+                yield Label('', id=f'si-header-{sec}', classes='si-section-header')
+                with Vertical(classes='si-card', id=f'si-card-{sec}'):
+                    yield Static('', id=f'si-{sec}', markup=True)
             with Vertical(classes='si-actions'):
                 yield Button('Re-probe  Ctrl+R', id='si-reprobe')
                 yield Button('Delete all cache', id='si-delete-cache')
@@ -157,33 +170,31 @@ class SysInfoWidget(Widget):
         tv = self.app.theme_variables
         probe = load_cached_probe()
         if probe is None:
-            # First launch with no cache — show loading state; probe runs async
-            self.query_one('#si-content', Static).update(
+            self.query_one('#si-header-cluster', Label).update('── Cluster ──')
+            self.query_one('#si-cluster', Static).update(
                 '[dim]No probe cache — probing SLURM cluster for the first time…[/]'
             )
             self.query_one('#si-age', Static).update('')
             return
 
-        lines: List[str] = []
-        W_NAME = 12  # column width for names
-        W_FEAT = 30  # column width for feature/field names
+        W_NAME = 12
 
-        # ── Cluster info ──────────────────────────────────────────────────────
-        lines.append('[bold $accent]── Cluster ──[/]')
+        # ── Cluster ──
+        self.query_one('#si-header-cluster', Label).update('── Cluster ──')
         cluster = probe.get('cluster', {})
-        for label, key in [
-            ('Cluster',   'cluster_name'),
-            ('SLURM',     'slurm_version'),
-            ('Scheduler', 'scheduler'),
-            ('Priority',  'priority_type'),
-            ('Select',    'select_type'),
-        ]:
-            val = cluster.get(key, '—')
-            lines.append(f'  [dim]{label:<{W_NAME}}[/] {val}')
+        cluster_rows = [
+            (label, cluster.get(key, '—'))
+            for label, key in [
+                ('Cluster', 'cluster_name'), ('SLURM', 'slurm_version'),
+                ('Scheduler', 'scheduler'), ('Priority', 'priority_type'),
+                ('Select', 'select_type'),
+            ]
+        ]
+        self.query_one('#si-cluster', Static).update(_kv_table(cluster_rows))
 
-        # ── GPU Hardware ──────────────────────────────────────────────────────
-        lines.append('')
-        lines.append('[bold $accent]── GPU Hardware ──[/]')
+        # ── GPU Hardware ──
+        self.query_one('#si-header-gpu', Label).update('── GPU Hardware ──')
+        gpu_rows: list[tuple[str, str]] = []
         try:
             from speek.speek_max.slurm import fetch_cluster_stats
             stats = fetch_cluster_stats()
@@ -204,16 +215,21 @@ class SysInfoWidget(Widget):
                         specs.append(f'{ram_pg}GB RAM/GPU')
                     specs.append(f'{n_nodes} node{"s" if n_nodes != 1 else ""}')
                     specs.append(f'{total} GPUs')
-                    lines.append(f'  [bold]{model:<{W_NAME}}[/bold] [dim]{" · ".join(specs)}[/dim]')
+                    gpu_rows.append((f'[bold]{model}[/bold]', f'[dim]{" · ".join(specs)}[/dim]'))
             else:
-                lines.append('  [dim]No GPU data available[/]')
+                gpu_rows.append(('[dim]No GPU data available[/]', ''))
         except Exception:
-            lines.append('  [dim]Could not fetch GPU info[/]')
+            gpu_rows.append(('[dim]Could not fetch GPU info[/]', ''))
+        self.query_one('#si-gpu', Static).update(_kv_table(gpu_rows, key_width=W_NAME))
 
-        # ── Commands + latency ───────────────────────────────────────────────
-        lines.append('')
-        lines.append('[bold $accent]── SLURM Commands ──[/]')
-        #              icon  name        latency  consequence
+        # ── SLURM Commands ──
+        self.query_one('#si-header-commands', Label).update('── SLURM Commands ──')
+        cmd_table = RichTable(show_header=False, show_edge=False, box=None,
+                              pad_edge=False, padding=(0, 1, 0, 0))
+        cmd_table.add_column('icon', no_wrap=True, width=2)
+        cmd_table.add_column('name', style='bold', no_wrap=True, min_width=12)
+        cmd_table.add_column('latency', justify='right', min_width=8)
+        cmd_table.add_column('desc', style='dim')
         cmds = probe.get('commands', {})
         for name, consequence in _CMD_CONSEQUENCES.items():
             entry = cmds.get(name, {})
@@ -222,21 +238,20 @@ class SysInfoWidget(Widget):
                 ms = entry.get('ms', 0)
             else:
                 ok, ms = bool(entry), 0
-            icon = _icon(ok, tv)
-            lat  = f'{_lat(ms, tv):>8}' if ok and ms else '        '
-            if ok:
-                lines.append(
-                    f'  {icon}  [bold]{name:<{W_NAME}}[/bold]  {lat}  [dim]{consequence}[/dim]'
-                )
-            else:
-                lines.append(
-                    f'  {icon}  [dim bold]{name:<{W_NAME}}[/dim bold]  {lat}  [dim]{consequence}[/dim]'
-                )
+            ico = _icon(ok, tv)
+            lat = _lat(ms, tv) if ok and ms else ''
+            name_str = name if ok else f'[dim]{name}[/dim]'
+            cmd_table.add_row(ico, name_str, lat, consequence)
+        self.query_one('#si-commands', Static).update(cmd_table)
 
-        # ── sacct capabilities ────────────────────────────────────────────────
-        lines.append('')
-        lines.append('[bold $accent]── sacct Capabilities ──[/]')
-
+        # ── sacct Capabilities ──
+        self.query_one('#si-header-sacct', Label).update('── sacct Capabilities ──')
+        sacct_table = RichTable(show_header=False, show_edge=False, box=None,
+                                pad_edge=False, padding=(0, 1, 0, 0))
+        sacct_table.add_column('icon', no_wrap=True, width=2)
+        sacct_table.add_column('field', no_wrap=True, min_width=24)
+        sacct_table.add_column('latency', justify='right', min_width=8)
+        sacct_table.add_column('note', style='dim')
         hist_entry = probe.get('sacct_history', probe.get('sacct_history_ok', False))
         if isinstance(hist_entry, dict):
             hist_ok = hist_entry.get('ok', False)
@@ -244,37 +259,30 @@ class SysInfoWidget(Widget):
         else:
             hist_ok, hist_ms = bool(hist_entry), 0
         hist_note = 'Job history beyond current day' if hist_ok else 'Limited to current day'
-        hist_lat = f'{_lat(hist_ms, tv):>8}' if hist_ok and hist_ms else '        '
-        lines.append(
-            f'  {_icon(hist_ok, tv)}  {"Extended history (-S)":<{W_FEAT}}  {hist_lat}  [dim]{hist_note}[/]'
-        )
-
+        hist_lat = _lat(hist_ms, tv) if hist_ok and hist_ms else ''
+        sacct_table.add_row(_icon(hist_ok, tv), 'Extended history (-S)', hist_lat, hist_note)
         sf = probe.get('sacct_fields', {})
         avail_set = set(sf.get('desired_available', []))
         for field, consequence in _FIELD_CONSEQUENCES.items():
             ok = field in avail_set
-            if ok:
-                lines.append(
-                    f'  {_icon(ok, tv)}  {field:<{W_FEAT}}            [dim]{consequence}[/dim]'
-                )
-            else:
-                lines.append(
-                    f'  {_icon(ok, tv)}  [dim]{field:<{W_FEAT}}            {consequence}[/dim]'
-                )
-
+            field_str = field if ok else f'[dim]{field}[/dim]'
+            sacct_table.add_row(_icon(ok, tv), field_str, '', consequence)
         strategy = probe.get('log_path_strategy', 'filesystem_fallback')
         strategy_label = _STRATEGY_LABELS.get(strategy, strategy)
-        lines.append(f'  [dim]{"Log strategy":<{W_FEAT}}            {strategy_label}[/]')
+        sacct_table.add_row('', '[dim]Log strategy[/dim]', '', strategy_label)
+        self.query_one('#si-sacct', Static).update(sacct_table)
 
-        # ── Missing desired fields ────────────────────────────────────────────
+        # ── Missing fields ──
         missing = sf.get('desired_missing', [])
         if missing:
-            lines.append('')
-            lines.append('[bold $accent]── Unavailable sacct Fields ──[/]')
-            lines.append(f'  [dim]{", ".join(missing)}[/]')
-            lines.append('  [dim](falls back gracefully)[/]')
-
-        self.query_one('#si-content', Static).update('\n'.join(lines))
+            self.query_one('#si-header-missing', Label).update('── Unavailable sacct Fields ──')
+            self.query_one('#si-missing', Static).update(
+                f'[dim]{", ".join(missing)}[/]\n[dim](falls back gracefully)[/]'
+            )
+            self.query_one(f'#si-card-missing').display = True
+        else:
+            self.query_one('#si-header-missing', Label).update('')
+            self.query_one(f'#si-card-missing').display = False
 
         ts = probe.get('timestamp', 0)
         self.query_one('#si-age', Static).update(
@@ -291,26 +299,31 @@ class SysInfoWidget(Widget):
         c_ok = tc(tv, 'text-success', 'green')
         c_dim = tc(tv, 'text-muted', 'bright_black')
 
-        lines: List[str] = ['', '[bold $accent]── Cache & Config Files ──[/]']
+        self.query_one('#si-header-cache', Label).update('── Cache & Config Files ──')
+        cache_table = RichTable(show_header=False, show_edge=False, box=None,
+                                pad_edge=False, padding=(0, 1, 0, 0))
+        cache_table.add_column('icon', no_wrap=True, width=2)
+        cache_table.add_column('size', justify='right', min_width=8)
+        cache_table.add_column('path', style='dim', no_wrap=True)
+        cache_table.add_column('desc', style='dim')
         total_bytes = 0
         for raw_path, description in _CACHE_FILES:
             p = Path(raw_path).expanduser()
             if p.exists():
                 size = p.stat().st_size
                 total_bytes += size
-                size_str = _fmt_size(size)
-                lines.append(
-                    f'  [{c_ok}]●[/]  {size_str:>8}  [dim]{_short_path(raw_path)}[/]'
-                    f'  [{c_dim}]{description}[/]'
+                cache_table.add_row(
+                    f'[{c_ok}]●[/]', _fmt_size(size),
+                    _short_path(raw_path), f'[{c_dim}]{description}[/]',
                 )
             else:
-                lines.append(
-                    f'  [{c_dim}]○[/]  {"—":>8}  [dim]{_short_path(raw_path)}[/]'
-                    f'  [{c_dim}]{description}[/]'
+                cache_table.add_row(
+                    f'[{c_dim}]○[/]', '—',
+                    _short_path(raw_path), f'[{c_dim}]{description}[/]',
                 )
-        lines.append(f'  [bold]Total: {_fmt_size(total_bytes)}[/bold]')
+        cache_table.add_row('', f'[bold]{_fmt_size(total_bytes)}[/bold]', '[bold]Total[/bold]', '')
         try:
-            self.query_one('#si-cache-info', Static).update('\n'.join(lines))
+            self.query_one('#si-cache', Static).update(cache_table)
         except Exception:
             pass
 
