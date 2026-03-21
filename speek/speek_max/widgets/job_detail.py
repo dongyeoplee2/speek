@@ -11,7 +11,7 @@ from textual.widgets import Static
 
 from speek.speek_max.widgets.modal_base import SpeekModal
 
-from speek.speek_max._utils import tc
+from speek.speek_max._utils import tc, STATE_SYMBOL
 
 
 # Fields to display, in order: (scontrol key, display label)
@@ -104,7 +104,9 @@ def _build_table(details: Dict[str, str], tv: Dict[str, str]) -> Table:
             continue
         _seen_labels.add(label)
         if key == 'JobState':
-            text = Text(val, style=f'bold {state_color}')
+            sym = STATE_SYMBOL.get(val.split()[0], '')
+            display_val = f'{sym} {val}' if sym else val
+            text = Text(display_val, style=f'bold {state_color}')
         elif key in ('JobId', 'JobName'):
             text = Text(val, style=f'bold {c_accent}')
         elif key in ('WorkDir', 'Command', 'StdOut', 'StdErr', 'TRES', 'ReqTRES', 'AllocTRES'):

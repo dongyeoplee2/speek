@@ -326,13 +326,13 @@ class SpeekMax(App[None]):
         if pending:
             parts.append(f'[bold {c_warning}]⏸ {pending}[/]')
         if oom:
-            parts.append(f'[bold {c_error}]☠ {oom} OOM[/]')
+            parts.append(f'[bold {c_error}]☢ {oom} OOM[/]')
         if failed:
             parts.append(f'[bold {c_error}]✗ {failed}F[/]')
         if timeout:
             parts.append(f'[bold {c_warning}]⏱ {timeout}T[/]')
         if completed:
-            parts.append(f'[dim]✔ {completed}C[/dim]')
+            parts.append(f'[#4A9FD9]✔ {completed}C[/]')
         # Fallback: any other unread not covered above
         other = unread - failed - timeout - completed
         if other > 0:

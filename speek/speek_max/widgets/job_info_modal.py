@@ -766,7 +766,7 @@ class JobInfoModal(SpeekModal):
         elif state == 'RUNNING':
             oom_msg = data.get('oom_detected')
             if oom_msg:
-                lines.append(f'[bold {c_error}]── ☠ OOM Detected ──[/]')
+                lines.append(f'[bold {c_error}]── ☢ OOM Detected ──[/]')
                 lines.append(f'  [bold {c_error}]{oom_msg}[/]')
                 lines.append('')
             lines.append(f'[bold {c_success}]── Running Status ──[/]')
@@ -784,7 +784,7 @@ class JobInfoModal(SpeekModal):
         elif state == 'COMPLETED':
             oom_msg = data.get('oom_detected')
             if oom_msg:
-                lines.append(f'[bold {c_error}]── ☠ OOM Detected ──[/]')
+                lines.append(f'[bold {c_error}]── ☢ OOM Detected ──[/]')
                 lines.append(f'  [bold {c_error}]{oom_msg}[/]')
                 lines.append(f'  [{c_warning}]Job completed but OOM errors found in log[/]')
                 lines.append('')

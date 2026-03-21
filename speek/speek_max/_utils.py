@@ -1,6 +1,43 @@
 from __future__ import annotations
 from typing import Dict
 
+STATE_SYMBOL = {
+    'RUNNING': '▶', 'PENDING': '⏸', 'COMPLETED': '✔',
+    'FAILED': '✗', 'TIMEOUT': '⏱', 'CANCELLED': '⊘',
+    'OUT_OF_MEMORY': '☢', 'NODE_FAIL': '╳', 'PREEMPTED': '⏏',
+    'SUSPENDED': '⏯', 'REQUEUED': '↻',
+}
+
+
+STATE_BG = {
+    'RUNNING': '#2d7a2d',   # green
+    'PENDING': '#8a7a00',   # amber
+    'COMPLETED': '#2a6a8a', # blue
+    'FAILED': '#8a2a2a',    # red
+    'TIMEOUT': '#7a4a00',   # orange
+    'CANCELLED': '#4a4a4a', # gray
+    'OUT_OF_MEMORY': '#7a2a5a', # magenta
+    'NODE_FAIL': '#5a2a2a', # dark red
+    'PREEMPTED': '#5a5a2a', # olive
+    'SUSPENDED': '#3a3a6a', # indigo
+    'REQUEUED': '#2a5a5a',  # teal
+}
+
+
+def state_sym(state: str) -> str:
+    """Return the symbol for a SLURM state, handling 'CANCELLED by ...' etc."""
+    base = state.split()[0] if state else ''
+    return STATE_SYMBOL.get(base, base)
+
+
+def state_badge(state: str) -> 'Text':
+    """Return a bold symbol with colored background for a SLURM state."""
+    from rich.text import Text
+    base = state.split()[0] if state else ''
+    sym = STATE_SYMBOL.get(base, base)
+    bg = STATE_BG.get(base, '#4a4a4a')
+    return Text(f' {sym} ', style=f'bold white on {bg}')
+
 _RICH_TO_TEXTUAL = {
     'black': 'ansi_black', 'red': 'ansi_red', 'green': 'ansi_green',
     'yellow': 'ansi_yellow', 'blue': 'ansi_blue', 'magenta': 'ansi_magenta',

@@ -8,7 +8,7 @@ from rich.text import Text
 from rich.table import Table
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widget import Widget
 from textual.widgets import Button, Input, Label, Select, Sparkline, Static
 
@@ -89,7 +89,7 @@ def _build_breakdown(rows: List[Dict], dim: str) -> Table:
     for r in rows[:14]:
         filled = int(r['gpu_hours'] / max_h * 24)
         bar = f'[green]{"█" * filled}[/green][dim]{"░" * (24 - filled)}[/dim]'
-        t.add_row(r['name'][:22], f"{r['gpu_hours']:.1f}", str(r['jobs']), bar)
+        t.add_row(r['name'], f"{r['gpu_hours']:.1f}", str(r['jobs']), bar)
     return t
 
 
@@ -109,16 +109,17 @@ def _build_issues(data: Dict, hours: int) -> Table:
 
     t = Table(box=None, show_header=False, expand=True,
               padding=(0, 1), show_edge=False)
-    t.add_column('', min_width=12, no_wrap=True)  # name
+    t.add_column('', min_width=10, max_width=14, no_wrap=True)  # name
     t.add_column('', justify='right', min_width=4)  # F
     t.add_column('', justify='right', min_width=4)  # T
     t.add_column('', justify='right', min_width=4)  # O
+    t.add_column('', justify='right', min_width=4)  # ☢ (log OOM)
     t.add_column('', min_width=BAR_W)  # bar
 
     if not by_model and not by_node:
         t.add_row(
             Text(f'No issues in the last {hours}h', style='dim green'),
-            Text(''), Text(''), Text(''), Text('✓', style='bold green'),
+            Text(''), Text(''), Text(''), Text(''), Text('✓', style='bold green'),
         )
         return t
 
@@ -126,14 +127,17 @@ def _build_issues(data: Dict, hours: int) -> Table:
     total_f = sum(d.get('failed', 0) for d in by_model.values())
     total_t = sum(d.get('timeout', 0) for d in by_model.values())
     total_o = sum(d.get('oom', 0) for d in by_model.values())
-    total_all = total_f + total_t + total_o
+    total_ol = sum(d.get('oom_log', 0) for d in by_model.values())
+    total_all = total_f + total_t + total_o + total_ol
 
-    # Summary header
+    # Summary header — put in the bar column to avoid stretching col 0
     summary = Text()
     summary.append(f'{total_all}', style='bold red' if total_all else 'bold green')
     summary.append(f' issues ', style='dim')
+    if total_ol:
+        summary.append(f'({total_ol} ☢) ', style='bold red')
     summary.append(f'(last {hours}h)', style='dim')
-    t.add_row(summary, Text(''), Text(''), Text(''), Text(''))
+    t.add_row(Text(''), Text(''), Text(''), Text(''), Text(''), summary)
 
     # Column labels
     t.add_row(
@@ -141,71 +145,67 @@ def _build_issues(data: Dict, hours: int) -> Table:
         Text('F', style='bold red'),
         Text('T', style='bold yellow'),
         Text('O', style='bold #ff00ff'),
+        Text('☢', style='bold red'),
         Text('', style='dim'),
     )
 
     max_total = max((d.get('total', 0) for d in by_model.values()), default=1) or 1
-    for name in sorted(by_model, key=lambda k: by_model[k].get('total', 0), reverse=True):
-        d = by_model[name]
-        f, to, o, tot = d.get('failed', 0), d.get('timeout', 0), d.get('oom', 0), d.get('total', 0)
-        # Stacked bar: red=failed, yellow=timeout, magenta=OOM
+    def _issue_row(name, d, max_val, bold=True):
+        f = d.get('failed', 0)
+        to = d.get('timeout', 0)
+        o = d.get('oom', 0)
+        ol = d.get('oom_log', 0)
+        tot = d.get('total', 0)
         bar = Text()
-        w_total = max(1, int(round(tot / max_total * BAR_W)))
-        w_f = int(round(f / tot * w_total)) if tot else 0
-        w_o = int(round(o / tot * w_total)) if tot else 0
-        w_t = w_total - w_f - w_o
-        if w_f > 0: bar.append('█' * w_f, style='red')
-        if w_t > 0: bar.append('█' * w_t, style='yellow')
-        if w_o > 0: bar.append('█' * w_o, style='#ff00ff')
+        w_total = max(1, int(round(tot / max_val * BAR_W))) if tot else 0
+        if w_total:
+            w_f = int(round(f / tot * w_total)) if tot else 0
+            w_ol = int(round(ol / tot * w_total)) if tot else 0
+            w_o = int(round(o / tot * w_total)) if tot else 0
+            w_t = w_total - w_f - w_o - w_ol
+            if w_f > 0: bar.append('█' * w_f, style='red')
+            if w_t > 0: bar.append('█' * w_t, style='yellow')
+            if w_o > 0: bar.append('█' * w_o, style='#ff00ff')
+            if w_ol > 0: bar.append('█' * w_ol, style='bold red')
         bar.append('░' * (BAR_W - w_total), style='dim')
         t.add_row(
-            Text(name[:14], style='bold'),
+            Text(name, style='bold' if bold else ''),
             Text(str(f), style=_issue_color(f)) if f else Text('·', style='dim'),
             Text(str(to), style=_issue_color(to)) if to else Text('·', style='dim'),
             Text(str(o), style=_issue_color(o)) if o else Text('·', style='dim'),
+            Text(str(ol), style='bold red') if ol else Text('·', style='dim'),
             bar,
         )
 
+    for name in sorted(by_model, key=lambda k: by_model[k].get('total', 0), reverse=True):
+        _issue_row(name, by_model[name], max_total)
+
     if by_node:
-        t.add_row(Text(''), Text(''), Text(''), Text(''), Text(''))
+        t.add_row(Text(''), Text(''), Text(''), Text(''), Text(''), Text(''))
         t.add_row(
             Text('Node', style='bold'),
             Text('F', style='bold red'),
             Text('T', style='bold yellow'),
             Text('O', style='bold #ff00ff'),
+            Text('☢', style='bold red'),
             Text('', style='dim'),
         )
         max_node = max((d.get('total', 0) for d in by_node.values()), default=1) or 1
         for name in sorted(by_node, key=lambda k: by_node[k].get('total', 0), reverse=True)[:8]:
-            d = by_node[name]
-            f, to, o, tot = d.get('failed', 0), d.get('timeout', 0), d.get('oom', 0), d.get('total', 0)
-            bar = Text()
-            w_total = max(1, int(round(tot / max_node * BAR_W)))
-            w_f = int(round(f / tot * w_total)) if tot else 0
-            w_o = int(round(o / tot * w_total)) if tot else 0
-            w_t = w_total - w_f - w_o
-            if w_f > 0: bar.append('█' * w_f, style='red')
-            if w_t > 0: bar.append('█' * w_t, style='yellow')
-            if w_o > 0: bar.append('█' * w_o, style='#ff00ff')
-            bar.append('░' * (BAR_W - w_total), style='dim')
-            t.add_row(
-                Text(name[:14]),
-                Text(str(f), style=_issue_color(f)) if f else Text('·', style='dim'),
-                Text(str(to), style=_issue_color(to)) if to else Text('·', style='dim'),
-                Text(str(o), style=_issue_color(o)) if o else Text('·', style='dim'),
-                bar,
-            )
+            _issue_row(name, by_node[name], max_node, bold=False)
 
     # Legend
-    t.add_row(Text(''), Text(''), Text(''), Text(''), Text(''))
+    t.add_row(Text(''), Text(''), Text(''), Text(''), Text(''), Text(''))
     legend = Text()
     legend.append('█', style='red')
     legend.append(' Failed  ', style='dim')
     legend.append('█', style='yellow')
     legend.append(' Timeout  ', style='dim')
     legend.append('█', style='#ff00ff')
-    legend.append(' OOM', style='dim')
-    t.add_row(Text(''), Text(''), Text(''), Text(''), legend)
+    legend.append(' OOM  ', style='dim')
+    legend.append('█', style='bold red')
+    legend.append(' ☢ Log OOM', style='dim')
+    t.add_row(Text(''), Text(''), Text(''), Text(''), Text(''), legend)
 
     return t
 
@@ -290,8 +290,9 @@ class StatsWidget(Widget):
             yield Label('', id='stats-lbl-jobs',    markup=True)
             yield Label('', id='stats-lbl-loading', markup=True)
 
-        # ── breakdown table ───────────────────────────────────────────────────
-        yield Static('', id='stats-breakdown', markup=True)
+        # ── per-group sparklines (scrollable) ────────────────────────────────
+        with VerticalScroll(id='stats-breakdown-scroll'):
+            pass  # populated dynamically
 
         # ── issue stats (chart + table) ───────────────────────────────────────
         with Vertical(id='stats-issues'):
@@ -360,6 +361,9 @@ class StatsWidget(Widget):
         self._range_key = rk
         is_custom = rk == 'custom'
         self.query_one('#stats-custom-bar').display = is_custom
+        if self._dim == 'issues':
+            self._load_issues()
+            return
         if is_custom:
             # Move keyboard focus to the From input so the user can type immediately
             try:
@@ -435,12 +439,80 @@ class StatsWidget(Widget):
             return
         if not getattr(self.app, '_feat_issue_stats', True):
             return
-        hours = getattr(self.app, '_issue_hours', 24)
+        # Use the same time window as the stats chart (respects custom range)
+        start, end = self._get_window()
+        delta = end - start
+        hours = max(1, int(delta.total_seconds() / 3600))
+
+        # Check issue-level cache (reuse if same hours and < 60s old)
+        import time as _time
+        _issue_cache = getattr(self, '_issue_result_cache', None)
+        if _issue_cache is not None:
+            c_hours, c_ts, c_data = _issue_cache
+            if c_hours == hours and (_time.monotonic() - c_ts) < 60.0:
+                self._render_issues(c_data, {}, hours)
+                return
 
         def _worker():
             try:
-                from speek.speek_max.slurm import fetch_issue_stats
+                from speek.speek_max.slurm import fetch_issue_stats, fetch_history, get_job_log_path
+                from speek.speek_max.log_scan import detect_oom
+                from collections import defaultdict
+                import time as _t
+
                 data = fetch_issue_stats(hours)
+
+                # Log OOM scan — cached per days value for 60s
+                days = max(1, hours // 24) or 1
+                cache = getattr(self, '_oom_log_cache', {})
+                cached = cache.get(days)
+                now = _t.monotonic()
+                if cached and now - cached[0] < 60.0:
+                    oom_by_model, oom_by_node = cached[1], cached[2]
+                else:
+                    oom_by_model = defaultdict(int)
+                    oom_by_node = defaultdict(int)
+                    try:
+                        rows = fetch_history(days=days)
+                        scanned = 0
+                        for r in rows:
+                            if scanned >= 50:
+                                break
+                            jid, part = r[0], r[2]
+                            state = r[5].strip() if len(r) > 5 else ''
+                            nodelist = r[8].strip() if len(r) > 8 else ''
+                            if state not in ('COMPLETED', 'RUNNING'):
+                                continue
+                            scanned += 1
+                            path = get_job_log_path(jid)
+                            if path and detect_oom(path):
+                                oom_by_model[part] += 1
+                                for node in nodelist.split(','):
+                                    node = node.strip()
+                                    if node and node not in ('None', ''):
+                                        oom_by_node[node] += 1
+                    except Exception:
+                        pass
+                    cache[days] = (now, dict(oom_by_model), dict(oom_by_node))
+                    self._oom_log_cache = cache
+
+                # Merge log-detected OOM into issue stats
+                if oom_by_model:
+                    by_model = data.setdefault('by_model', {})
+                    for model, count in oom_by_model.items():
+                        if model not in by_model:
+                            by_model[model] = {'failed': 0, 'timeout': 0, 'oom': 0, 'total': 0}
+                        by_model[model]['oom_log'] = count
+                        by_model[model]['total'] += count
+                    by_node = data.setdefault('by_node', {})
+                    for node, count in oom_by_node.items():
+                        if node not in by_node:
+                            by_node[node] = {'failed': 0, 'timeout': 0, 'oom': 0, 'total': 0}
+                        by_node[node]['oom_log'] = count
+                        by_node[node]['total'] += count
+
+                import time as _t2
+                self._issue_result_cache = (hours, _t2.monotonic(), data)
                 self.app.call_from_thread(self._render_issues, data, {}, hours)
             except Exception:
                 pass
@@ -462,13 +534,15 @@ class StatsWidget(Widget):
             try:
                 from speek.speek_max.slurm import (
                     fetch_stats_rows_chunked, _compute_timeseries, _compute_breakdown,
+                    _compute_per_group_timeseries,
                 )
 
                 def on_chunk(rows, done: int, total: int) -> None:
                     ts = _compute_timeseries(rows, start, end, dim, fval, n_buckets)
                     bd = _compute_breakdown(rows, dim)
+                    pg = _compute_per_group_timeseries(rows, start, end, dim, n_buckets) if done == total else {}
                     lbl = f'[dim]{done}/{total} days…[/dim]' if done < total else ''
-                    self.app.call_from_thread(self._render_partial, ts, bd, lbl)
+                    self.app.call_from_thread(self._render_partial, ts, bd, lbl, pg)
 
                 fetch_stats_rows_chunked(start, end, on_chunk)
             except Exception as exc:
@@ -481,9 +555,10 @@ class StatsWidget(Widget):
         self.run_worker(_worker, thread=True, exclusive=True, group='stats-load')
 
     @safe('Stats render')
-    def _render_partial(self, ts: Dict, bd: List[Dict], loading_label: str = '') -> None:
+    def _render_partial(self, ts: Dict, bd: List[Dict], loading_label: str = '',
+                        per_group: Dict = None) -> None:
         """Called from worker thread via call_from_thread for each day chunk."""
-        self._render_stats(ts, bd)
+        self._render_stats(ts, bd, per_group)
         if not loading_label:
             # Final chunk: show "no data" if sacct returned nothing
             if ts.get('n_jobs', 0) == 0 and not ts.get('buckets'):
@@ -514,7 +589,7 @@ class StatsWidget(Widget):
 
     # ── Render ─────────────────────────────────────────────────────────────────
 
-    def _render_stats(self, ts: Dict, bd: List[Dict]) -> None:
+    def _render_stats(self, ts: Dict, bd: List[Dict], per_group: Dict = None) -> None:
         # chart title
         try:
             rk   = self._range_key.upper() if self._range_key != 'custom' else 'Custom'
@@ -557,12 +632,37 @@ class StatsWidget(Widget):
         except Exception:
             pass
 
-        # breakdown
-        try:
-            self.query_one('#stats-breakdown', Static).update(
-                _build_breakdown(bd, self._dim))
-        except Exception:
-            pass
+        # per-group sparklines in scrollable area
+        if per_group:
+            try:
+                scroll = self.query_one('#stats-breakdown-scroll', VerticalScroll)
+                scroll.remove_children()
+                # Sort by total GPU hours descending
+                sorted_groups = sorted(
+                    per_group.items(),
+                    key=lambda kv: sum(kv[1].get('buckets', [])),
+                    reverse=True,
+                )
+                for grp_name, grp_ts in sorted_groups:
+                    buckets = grp_ts.get('buckets', [])
+                    peak = grp_ts.get('peak', 0)
+                    total_h = grp_ts.get('total_gpu_hours', 0)
+                    jobs = grp_ts.get('n_jobs', 0)
+                    # Container for each group
+                    container = Vertical(classes='stats-group-row')
+                    header = Static(
+                        f'[bold]{grp_name}[/bold]  '
+                        f'[dim]peak[/dim] [bold]{peak:.0f}[/bold]  '
+                        f'[dim]{total_h:.1f} GPU·h[/dim]  '
+                        f'[dim]{jobs} jobs[/dim]',
+                        markup=True,
+                    )
+                    spark = Sparkline(buckets, summary_function=max)
+                    scroll.mount(container)
+                    container.mount(header)
+                    container.mount(spark)
+            except Exception:
+                pass
 
     def _update_y_axis(self) -> None:
         """Re-render y-axis ticks based on current sparkline height."""
