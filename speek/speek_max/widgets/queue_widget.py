@@ -12,8 +12,12 @@ from textual.widget import Widget
 from textual.widgets import Label, LoadingIndicator, Static
 
 from speek.speek_max.slurm import fetch_all_priorities, fetch_job_details, fetch_job_stats, fetch_queue
-from speek.speek_max._utils import tc, safe
+from speek.speek_max._utils import fmt_time, tc, safe, state_sym
 from speek.speek_max.widgets.datatable import SpeekDataTable
+from speek.speek_max.widgets.foldable_table import (
+    FoldableTableMixin, FoldGroup, FoldMode, Leaf, Divider, Spacer,
+    TreeNode, TableContext, _build_divider_cells,
+)
 from speek.speek_max.widgets.ping_tracker import PingTracker
 
 
@@ -48,7 +52,11 @@ def _pre_build_queue_rows(
     rows: List[Tuple], priorities: Optional[Dict], tv: dict,
 ) -> Tuple[frozenset, List[Tuple], Optional['Text'], bool]:
     """Aggregate + pre-build Rich Text rows for the queue DataTable.
-    Runs in a worker thread so the main thread only does DataTable DOM ops."""
+    Runs in a worker thread so the main thread only does DataTable DOM ops.
+
+    Returns (sig, built, stats_text, has_rows).
+    Each entry in built is (col0..col8(9 cols), row_key, partition_name, jobs).
+    """
     c_muted     = tc(tv, 'text-muted',     'bright_black')
     c_primary   = tc(tv, 'text-primary',   'bold')
     c_secondary = tc(tv, 'text-secondary', 'default')
@@ -59,7 +67,7 @@ def _pre_build_queue_rows(
 
     # Aggregation
     groups: Dict[tuple, dict] = {}
-    for jid, user, name, part, gpus, state, elapsed in rows:
+    for jid, user, name, part, gpus, state, elapsed, start in rows:
         matched = None
         for key, g in groups.items():
             ku, kn, kp, ks = key
@@ -69,15 +77,23 @@ def _pre_build_queue_rows(
         if matched is None:
             matched = (user, name, part, state)
             groups[matched] = {'ids': [], 'gpus': 0, 'elapsed': elapsed,
-                               'first_id': jid, 'name': name}
+                               'first_id': jid, 'name': name, 'start': start}
         g = groups[matched]
         g['ids'].append(jid)
+        g.setdefault('jobs', []).append({
+            'jid': jid, 'user': user, 'name': name,
+            'part': part, 'gpus': gpus, 'state': state, 'elapsed': elapsed,
+            'start': start,
+        })
         try:
             g['gpus'] += int(gpus)
         except (ValueError, TypeError):
             pass
         if elapsed > g['elapsed']:
             g['elapsed'] = elapsed
+        # Keep earliest start time
+        if start and (not g['start'] or start < g['start']):
+            g['start'] = start
 
     # Top-3 user rank by running GPUs
     user_running: Dict[str, int] = defaultdict(int)
@@ -87,9 +103,18 @@ def _pre_build_queue_rows(
     ranked = [u for u, _ in sorted(user_running.items(), key=lambda x: -x[1]) if _ > 0]
     user_rank = {u: i + 1 for i, u in enumerate(ranked[:3])}
 
-    # Pre-build Rich Text row tuples: (col0, col1, …, col8, row_key)
+    # Sort groups: partition first, then RUNNING before PENDING, then by user
+    _state_order = {'RUNNING': 0, 'PENDING': 1}
+    sorted_keys = sorted(
+        groups.keys(),
+        key=lambda k: (k[2], _state_order.get(k[3], 2), k[0]),  # (partition, state_rank, user)
+    )
+
+    # Pre-build Rich Text row tuples: (col0, col1, …, col8, row_key, partition)
     built: List[Tuple] = []
-    for (user, _kn, part, state), g in groups.items():
+    for key in sorted_keys:
+        user, _kn, part, state = key
+        g = groups[key]
         count   = len(g['ids'])
         gpu_str = str(g['gpus']) if g['gpus'] else '-'
         emoji   = _RANK_EMOJI.get(user_rank.get(user, 0), '')
@@ -105,17 +130,20 @@ def _pre_build_queue_rows(
                                      style=c_warning)
                 except (ValueError, TypeError):
                     pass
+        ago_str = fmt_time(g['start']) if g.get('start') and g['start'] not in ('N/A', 'Unknown') else '—'
         built.append((
+            Text(f'   {g["name"]}'),
             Text(str(count), style=f'bold {c_muted}'),
             user_cell,
-            Text(g['name']),
-            Text(part, style=c_secondary),
             Text(gpu_str, style='bold'),
             _state_text(state, tv),
             Text(g['elapsed'], style=c_muted),
+            Text(ago_str, style=c_muted),
             prio_text,
             Text(_fmt_job_ids(g['ids']), style=c_muted),
             g['first_id'],   # row key — NOT a column cell
+            part,            # partition name — NOT a column cell
+            g['jobs'],       # raw per-job data — NOT a column cell
         ))
 
     # Pre-build stats bar text
@@ -151,22 +179,11 @@ def _fmt_job_ids(ids: List[str], max_len: int = 32) -> str:
 
 
 def _state_text(state: str, tv: dict) -> Text:
-    s = tc(tv, 'text-success', 'green')
-    w = tc(tv, 'text-warning', 'yellow')
-    e = tc(tv, 'text-error', 'red')
-    m = tc(tv, 'text-muted', 'bright_black')
-    styles = {
-        'RUNNING': f'bold {s}',
-        'PENDING': w,
-        'FAILED': f'bold {e}',
-        'TIMEOUT': f'bold {e}',
-        'CANCELLED': f'dim {e}',
-        'COMPLETED': f'dim {m}',
-    }
-    return Text(state, style=styles.get(state, 'default'))
+    from speek.speek_max._utils import state_badge
+    return state_badge(state)
 
 
-class QueueWidget(Widget):
+class QueueWidget(FoldableTableMixin, Widget):
     """Full cluster queue (all users, RUNNING+PENDING). Auto-refreshes every 5s."""
 
     BORDER_TITLE = "Queue"
@@ -175,6 +192,8 @@ class QueueWidget(Widget):
     BINDINGS = [
         Binding('d', 'job_detail', 'Detail', show=True),
         Binding('r', 'refresh', 'Refresh', show=True),
+        Binding('v', 'toggle_fold', '▶/▼', show=True),
+        Binding('V', 'fold_all', '', show=False),
     ]
 
     def compose(self) -> ComposeResult:
@@ -186,20 +205,25 @@ class QueueWidget(Widget):
 
     def on_mount(self) -> None:
         self._last_queue_sig: frozenset = frozenset()
+        self._last_built: List[Tuple] = []
+        self._last_stats_text: Optional[Text] = None
+        self._last_has_rows: bool = False
+        self._ctx = self._init_ctx(renderer=self._render_cell, n_cols=9, name_col_width=22)
         ping_dur = getattr(self.app, '_ping_duration', 10)
         self._ping = PingTracker(duration=ping_dur)
+        self._tree: List[TreeNode] = []
         dt = self.query_one(SpeekDataTable)
-        self._col_widths = [3, 12, 20, 10, 5, 9, 9, 6, 24]
+        self._col_widths = [20, 3, 12, 5, 9, 9, 5, 6, 24]
         dt.zebra_stripes = True
-        dt.add_column('#',         width=2)
+        dt.add_column('Name',      width=22)
+        dt.add_column('#J',         width=2)
         dt.add_column('User',      width=8)
-        dt.add_column('Name',      width=14)
-        dt.add_column('Partition', width=6)
-        dt.add_column('GPU',       width=3)
-        dt.add_column('State',     width=7)
+        dt.add_column('#G',       width=3)
+        dt.add_column('State',     width=3)
         dt.add_column('Elapsed',   width=7)
+        dt.add_column('Ago',       width=5)
         dt.add_column('Prio',      width=4)
-        dt.add_column('IDs',       width=10)
+        dt.add_column('IDs',       width=16)
 
     def on_show(self) -> None:
         self._load()
@@ -261,41 +285,169 @@ class QueueWidget(Widget):
         if sig == self._last_queue_sig:
             return
         self._last_queue_sig = sig
+        self._last_built = built
+        self._last_stats_text = stats_text
+        self._last_has_rows = has_rows
 
-        # Update ping tracker with per-cell signatures
+        # Update ping tracker with per-cell signatures (job rows only)
         self._ping.duration = getattr(self.app, '_ping_duration', 10)
         row_sigs: dict[str, list[str]] = {}
-        for *cells, row_key in built:
+        for *cells, row_key, _part, _jobs in built:
             row_sigs[str(row_key)] = [
                 c.plain if hasattr(c, 'plain') else str(c) for c in cells
             ]
         self._ping.update(row_sigs)
 
-        dt    = self.query_one(SpeekDataTable)
-        empty = self.query_one('#queue-empty', Static)
+        self._rebuild_table(stats_text, has_rows)
 
-        try:
-            cursor_key = dt.coordinate_to_cell_key(dt.cursor_coordinate)[0].value if dt.row_count else None
-        except Exception:
-            cursor_key = None
+    # ── Tree building ────────────────────────────────────────────────────────
 
-        with self.app.batch_update():
-            dt.clear()
-            for *cells, row_key in built:
+    def _build_tree(self, built: List[Tuple]) -> List[TreeNode]:
+        """Convert pre-built rows into a tree of partition dividers and job groups."""
+        # Group built rows by partition, preserving sort order
+        partition_order: List[str] = []
+        partition_rows: Dict[str, List[Tuple]] = defaultdict(list)
+        partition_gpus: Dict[str, int] = defaultdict(int)
+        partition_count: Dict[str, int] = defaultdict(int)
+        for entry in built:
+            *cells, row_key, part, jobs = entry
+            if part not in partition_rows:
+                partition_order.append(part)
+            partition_rows[part].append(entry)
+            try:
+                partition_gpus[part] += int(cells[3].plain) if cells[3].plain != '-' else 0
+            except (ValueError, TypeError):
+                pass
+            partition_count[part] += int(cells[1].plain) if cells[1].plain else 1
+
+        # Sort partitions by total GPU usage descending
+        partition_order.sort(key=lambda p: -partition_gpus.get(p, 0))
+
+        # Prune collapsed set to only current partitions
+        valid = set(partition_order)
+        self._ctx.collapsed &= valid
+
+        tree: List[TreeNode] = []
+        for part in partition_order:
+            count_cell = Text(str(partition_count.get(part, 0)), style='bold')
+            gpu_total = partition_gpus.get(part, 0)
+            gpu_cell = Text(str(gpu_total) if gpu_total else '', style='bold')
+
+            # Partition divider as FoldGroup with COLLAPSED_SET
+            children: List[TreeNode] = []
+            for entry in partition_rows[part]:
+                *cells, row_key, _part, jobs = entry
                 rk = str(row_key)
-                out = [
+                count = len(jobs)
+                if count > 1:
+                    # Job group as FoldGroup with EXPANDED_SET
+                    ind_children = [
+                        Leaf(key=f'ind::{job["jid"]}', data=job, indent=7)
+                        for job in jobs
+                    ]
+                    children.append(FoldGroup(
+                        key=rk,
+                        fold_key=rk,
+                        data={'cells': cells, 'jobs': jobs, 'row_key': row_key},
+                        children=ind_children,
+                        mode=FoldMode.EXPANDED_SET,
+                        indent=3,
+                    ))
+                else:
+                    children.append(Leaf(
+                        key=rk,
+                        data={'cells': cells, 'jobs': jobs, 'row_key': row_key},
+                        indent=3,
+                    ))
+
+            tree.append(FoldGroup(
+                key=f'div::{part}',
+                fold_key=part,
+                data={'label': part.upper(), 'count_cell': count_cell, 'gpu_cell': gpu_cell},
+                children=children,
+                mode=FoldMode.COLLAPSED_SET,
+                indent=0,
+            ))
+        return tree
+
+    def _render_cell(self, node: TreeNode, is_collapsed: bool, n_cols: int) -> List[Text]:
+        """Render a tree node into a list of Text cells."""
+        if isinstance(node, FoldGroup) and node.mode == FoldMode.COLLAPSED_SET:
+            # Partition divider with fold icon
+            d = node.data
+            div = Divider(key=node.key, label=d['label'],
+                          extra_cells={1: d['count_cell'], 3: d['gpu_cell']})
+            return _build_divider_cells(self._ctx, div)
+
+        if isinstance(node, FoldGroup) and node.mode == FoldMode.EXPANDED_SET:
+            # Job group header
+            d = node.data
+            cells = list(d['cells'])
+            jobs = d['jobs']
+            orig_name = jobs[0]['name'] if jobs else cells[0].plain.strip()
+            count = len(jobs)
+            if count > 1:
+                icon = '▼' if not is_collapsed else '▶'
+                cells[0] = Text(f'   {icon} {orig_name}')
+            else:
+                cells[0] = Text(f'     {orig_name}')
+            rk = str(d['row_key'])
+            return [
+                _color_flash(cells[i], self._ping.cell_intensity(rk, i))
+                for i in range(len(cells))
+            ]
+
+        if isinstance(node, Leaf):
+            if node.indent == 7:
+                # Individual job under an expanded group
+                job = node.data
+                tv = self.app.theme_variables
+                c_m = tc(tv, 'text-muted', 'bright_black')
+                gpu_s = str(job['gpus']) if job['gpus'] else '-'
+                job_start = job.get('start', '')
+                job_ago = fmt_time(job_start) if job_start and job_start not in ('N/A', 'Unknown') else '—'
+                return [
+                    Text(f'   {"└" if node.is_last else "├"}── {job["name"]}', style=c_m),
+                    Text(''),
+                    Text(job['user'], style=c_m),
+                    Text(gpu_s, style=c_m),
+                    _state_text(job['state'], tv),
+                    Text(job['elapsed'], style=c_m),
+                    Text(job_ago, style=c_m),
+                    Text(''),
+                    Text(job['jid'], style=c_m),
+                ]
+            else:
+                # Top-level single job
+                d = node.data
+                cells = list(d['cells'])
+                jobs = d['jobs']
+                orig_name = jobs[0]['name'] if jobs else cells[0].plain.strip()
+                cells[0] = Text(f'     {orig_name}')
+                rk = str(d['row_key'])
+                return [
                     _color_flash(cells[i], self._ping.cell_intensity(rk, i))
                     for i in range(len(cells))
                 ]
-                dt.add_row(*out, key=row_key)
 
-            # Ghost rows for recently removed entries
-            for ghost_key, g_intensity in self._ping.ghosts():
-                bright = int(60 + g_intensity * 80)
-                gs = f'dim #{bright:02x}{bright:02x}{bright:02x}'
-                n = len(self._col_widths)
-                ghost = [Text('—', style=gs)] + [Text('', style=gs) for _ in range(n - 1)]
-                dt.add_row(*ghost, key=f'_ghost_{ghost_key}')
+        return [Text('') for _ in range(n_cols)]
+
+    def _rebuild_table(self, stats_text: Optional[Text], has_rows: bool) -> None:
+        """Rebuild the DataTable from self._last_built using tree engine."""
+        built = self._last_built
+        dt    = self.query_one(SpeekDataTable)
+        empty = self.query_one('#queue-empty', Static)
+        n_cols = len(self._col_widths)
+
+        self._tree = self._build_tree(built)
+        self._rebuild(dt, self._ctx, self._tree)
+
+        # Ghost rows for recently removed entries
+        for ghost_key, g_intensity in self._ping.ghosts():
+            bright = int(60 + g_intensity * 80)
+            gs = f'dim #{bright:02x}{bright:02x}{bright:02x}'
+            ghost = [Text('—', style=gs)] + [Text('', style=gs) for _ in range(n_cols - 1)]
+            dt.add_row(*ghost, key=f'_ghost_{ghost_key}')
 
         # Schedule re-render while pings are fading
         if self._ping.has_active and not hasattr(self, '_ping_timer'):
@@ -318,12 +470,6 @@ class QueueWidget(Widget):
         else:
             stats_bar.display = False
 
-        if cursor_key:
-            try:
-                dt.move_cursor(row=dt.get_row_index(cursor_key))
-            except Exception:
-                pass
-
     def _tick_ping(self) -> None:
         """Re-render table while ping highlights are fading."""
         if self._ping.has_active:
@@ -336,13 +482,23 @@ class QueueWidget(Widget):
 
     def _selected_job_id(self):
         dt = self.query_one(SpeekDataTable)
-        if dt.row_count == 0:
+        key = self._selected_key(dt, self._ctx)
+        if not key or key.startswith(('div::', '_ghost_', 'ind::')):
             return None
-        try:
-            row_key, _ = dt.coordinate_to_cell_key(dt.cursor_coordinate)
-            return str(row_key.value)
-        except Exception:
-            return None
+        return key
+
+    def action_toggle_fold(self) -> None:
+        """Toggle fold on divider (partition) or job group row."""
+        dt = self.query_one(SpeekDataTable)
+        key = self._selected_key(dt, self._ctx)
+        if not key or key.startswith(('_ghost_', 'ind::')):
+            return
+        self._toggle_and_rebuild(dt, self._ctx, self._tree, key)
+
+    def action_fold_all(self) -> None:
+        """Fold or unfold ALL partitions and collapse all expanded groups."""
+        dt = self.query_one(SpeekDataTable)
+        self._fold_all_and_rebuild(dt, self._ctx, self._tree)
 
     def action_job_detail(self) -> None:
         jid = self._selected_job_id()

@@ -17,8 +17,12 @@ from speek.speek_max.widgets.modal_base import SpeekModal
 from textual.widgets import Button, DataTable, Input, Label, LoadingIndicator, Static, TabbedContent, TabPane
 
 from speek.speek_max.slurm import fetch_all_priorities, fetch_history, fetch_my_jobs, get_job_log_path
-from speek.speek_max._utils import tc, safe
+from speek.speek_max._utils import fmt_time, tc, safe, state_sym, state_badge
 from speek.speek_max.widgets.datatable import SpeekDataTable
+from speek.speek_max.widgets.foldable_table import (
+    FoldableTableMixin, FoldGroup, FoldMode, Leaf, Divider, Spacer,
+    TreeNode, TableContext, _build_divider_cells,
+)
 
 
 # ── Time dividers for history tab ─────────────────────────────────────────────
@@ -91,10 +95,10 @@ def _aggregate_within(items: List[dict]) -> List[dict]:
 def _aggregate_by_project(rows: List[Tuple]) -> Dict[str, List[dict]]:
     """Group rows by project name (name_base), preserving order."""
     projects: Dict[str, List[dict]] = OrderedDict()
-    for jid, name, part, gpus, state, elapsed, eta in rows:
+    for jid, name, part, gpus, state, elapsed, eta, start in rows:
         proj = _project_name(name)
         item = {'jid': jid, 'name': name, 'part': part, 'gpu': gpus,
-                'state': state, 'elapsed': elapsed, 'eta': eta}
+                'state': state, 'elapsed': elapsed, 'eta': eta, 'start': start}
         projects.setdefault(proj, []).append(item)
     return projects
 
@@ -139,7 +143,7 @@ class CancelSelectModal(SpeekModal):
         self.dismiss(None)
 
 
-class MyJobsWidget(Widget):
+class MyJobsWidget(FoldableTableMixin, Widget):
     """Current user's running + pending jobs grouped by project."""
 
     BORDER_TITLE = "My Jobs"
@@ -148,7 +152,7 @@ class MyJobsWidget(Widget):
     BINDINGS = [
         Binding('d',     'view_job',    'Details',  show=True),
         Binding('enter', 'view_job',   'Details',  show=False),
-        Binding('v',     'toggle_fold', '▶/▼',     show=False),
+        Binding('v',     'toggle_fold', '▶▼',       show=True),
         Binding('V',     'fold_all',   '',         show=False),
         Binding('x',     'cancel_job', 'Cancel',   show=True),
         Binding('1',     'tab_current', '',        show=False),
@@ -195,9 +199,6 @@ class MyJobsWidget(Widget):
                 yield Static('', id='myjobs-hist-empty', classes='empty-state')
 
     def on_mount(self) -> None:
-        self._row_keys: List[str] = []        # maps dt row index → key (proj:: or jid or ind::jid)
-        self._collapsed: set[str] = set()     # collapsed project names
-        self._expanded_groups: set[str] = set()  # first_jids of expanded groups
         self._log_hints: Dict[str, str] = {}  # first_jid → last log line
         self._oom_jobs: set[str] = set()       # jids with OOM detected
         self._oom_notified: set[str] = set()  # jids already notified
@@ -205,33 +206,41 @@ class MyJobsWidget(Widget):
         self._job_data: Dict[str, dict] = {}  # jid → individual item dict
         self._last_rows: List[Tuple] = []
         self._last_priorities: Dict = {}
+        self._last_myjobs_sig: frozenset = frozenset()
+
+        # Current tab context + tree
         dt = self.query_one(SpeekDataTable)
         dt.zebra_stripes = True
-        dt.add_column('#',         width=2)
-        dt.add_column('Name',      width=12)
+        dt.add_column('Name',      width=22)
+        dt.add_column('#J',         width=2)
+        dt.add_column('#G',       width=3)
         dt.add_column('Part',      width=5)
-        dt.add_column('GPU',       width=3)
-        dt.add_column('State',     width=7)
+        dt.add_column('State',     width=3)
         dt.add_column('Elapsed',   width=7)
+        dt.add_column('Ago',       width=5)
         dt.add_column('ETA',       width=5)
         dt.add_column('Rank',      width=4)
-        dt.add_column('IDs',       width=8)
+        dt.add_column('IDs',       width=14)
         self._log_col = dt.add_column('Log', width=16)
-        # History tab
+        self._current_ctx = self._init_ctx(renderer=self._render_current_cell, n_cols=11, name_col_width=22)
+        self._current_tree: List[TreeNode] = []
+
+        # History tab context + tree
         hdt = self.query_one(_MYHIST_DT, SpeekDataTable)
         hdt.zebra_stripes = True
-        hdt.add_column('#',         width=2)
-        hdt.add_column('Name',      width=12)
+        hdt.add_column('Name',      width=22)
+        hdt.add_column('#J',         width=2)
+        hdt.add_column('#G',       width=3)
         hdt.add_column('Part',      width=5)
-        hdt.add_column('GPU',       width=3)
-        hdt.add_column('State',     width=7)
+        hdt.add_column('State',     width=3)
         hdt.add_column('Elapsed',   width=7)
-        hdt.add_column('IDs',       width=8)
-        self._hist_groups: Dict[str, list] = {}
-        self._hist_collapsed: set[str] = set()
+        hdt.add_column('Ago',       width=5)
+        hdt.add_column('IDs',       width=14)
+        self._history_ctx = self._init_ctx(renderer=self._render_history_cell, n_cols=8, name_col_width=22)
+        self._history_tree: List[TreeNode] = []
         self._hist_first_load: bool = True
-        self._hist_row_keys: List[str] = []
         self._last_hist_sig: str = ''
+
         self._load()
         self.set_timer(3.0, self._load_history)
         interval = getattr(self.app, '_queue_refresh', 5)
@@ -368,16 +377,106 @@ class MyJobsWidget(Widget):
             return f'{h}:{m:02d}'
         return f'{m}m'
 
-    def _project_header_row(
-        self, proj: str, items: List[dict], collapsed: bool,
-        c_muted: str, c_secondary: str, c_success: str, c_warning: str,
-    ) -> tuple:
-        indicator = '▶' if collapsed else '▼'
+    # ── Current tab: tree building ────────────────────────────────────────────
+
+    def _build_current_tree(
+        self, projects: Dict[str, List[dict]], priorities: Dict,
+        part_ranked: Dict, part_rank_index: Dict, colors: tuple,
+    ) -> List[TreeNode]:
+        """Build tree for the Current tab."""
+        c_muted, c_secondary, c_success, c_warning, c_error = colors
+        state_style = {
+            'RUNNING': f'bold {c_success}',
+            'PENDING': f'bold {c_warning}',
+            'FAILED':  f'bold {c_error}',
+            'TIMEOUT': f'bold {c_error}',
+            'CANCELLED': f'bold {c_muted}',
+            'COMPLETED': 'bold #4A9FD9',
+            'OUT_OF_MEMORY': f'bold {c_error}',
+        }
+        tree: List[TreeNode] = []
+        new_first_jids: List[str] = []
+
+        for proj, items in projects.items():
+            # Store job data for individual rows
+            for item in items:
+                self._job_data[item['jid']] = item
+
+            agg_groups = _aggregate_within(items)
+            children: List[TreeNode] = []
+            for g in agg_groups:
+                first_jid = g['ids'][0]
+                self._group_ids[first_jid] = g['ids']
+                new_first_jids.append(first_jid)
+                count = len(g['ids'])
+                if count > 1:
+                    ind_children = [
+                        Leaf(key=f'ind::{jid}', data={'jid': jid, 'group': g, 'state_style': state_style, 'colors': colors}, indent=7)
+                        for jid in g['ids']
+                    ]
+                    children.append(FoldGroup(
+                        key=first_jid,
+                        fold_key=first_jid,
+                        data={
+                            'group': g, 'priorities': priorities,
+                            'part_ranked': part_ranked, 'part_rank_index': part_rank_index,
+                            'state_style': state_style, 'colors': colors,
+                        },
+                        children=ind_children,
+                        mode=FoldMode.EXPANDED_SET,
+                        indent=3,
+                    ))
+                else:
+                    children.append(Leaf(
+                        key=first_jid,
+                        data={
+                            'group': g, 'priorities': priorities,
+                            'part_ranked': part_ranked, 'part_rank_index': part_rank_index,
+                            'state_style': state_style, 'colors': colors,
+                        },
+                        indent=3,
+                    ))
+
+            tree.append(FoldGroup(
+                key=f'{_PROJ}{proj}',
+                fold_key=proj,
+                data={'proj': proj, 'items': items, 'colors': colors},
+                children=children,
+                mode=FoldMode.COLLAPSED_SET,
+                indent=0,
+            ))
+
+        self._new_first_jids = new_first_jids
+        return tree
+
+    def _render_current_cell(self, node: TreeNode, is_collapsed: bool, n_cols: int) -> List[Text]:
+        """Render a Current tab tree node."""
+        if isinstance(node, FoldGroup) and node.mode == FoldMode.COLLAPSED_SET:
+            # Project header
+            return self._render_project_header(node, is_collapsed)
+
+        if isinstance(node, FoldGroup) and node.mode == FoldMode.EXPANDED_SET:
+            # Job group header (with fold icon)
+            return self._render_job_group(node, is_collapsed, with_fold=True)
+
+        if isinstance(node, Leaf):
+            if node.indent == 7:
+                return self._render_individual_job(node)
+            elif node.indent == 3:
+                return self._render_job_group_leaf(node)
+
+        return [Text('') for _ in range(n_cols)]
+
+    def _render_project_header(self, node: FoldGroup, is_collapsed: bool) -> List[Text]:
+        d = node.data
+        proj = d['proj']
+        items = d['items']
+        c_muted, c_secondary, c_success, c_warning, c_error = d['colors']
+
         total = sum(len(it.get('ids', [it])) for it in items)
         n_run  = sum(1 for it in items if it['state'] == 'RUNNING')
         n_pend = sum(1 for it in items if it['state'] == 'PENDING')
-        n_gpu  = sum(int(it['gpu']) for it in items if it['gpu'].isdigit())
-        # Project elapsed: max elapsed across all jobs
+        n_gpu  = sum(int(it['gpu']) * len(it.get('ids', [it])) for it in items if it.get('gpu', '').isdigit())
         max_secs = max((self._parse_elapsed(it.get('elapsed', '')) for it in items), default=0)
         elapsed_str = self._fmt_elapsed(max_secs)
         state_t = Text()
@@ -387,101 +486,441 @@ class MyJobsWidget(Widget):
         if n_pend:
             state_t.append(str(n_pend), style=f'bold {c_warning}')
             state_t.append('P', style=c_muted)
-        return (
+        # Earliest start across all items in the project
+        earliest_start = ''
+        for it in items:
+            s = it.get('start', '')
+            if s and s not in ('N/A', 'Unknown') and (not earliest_start or s < earliest_start):
+                earliest_start = s
+        ago_str = fmt_time(earliest_start) if earliest_start else '—'
+
+        icon = '▶' if is_collapsed else '▼'
+        return [
+            Text(f'{icon} {proj}', style='bold'),
             Text(str(total), style=f'bold {c_secondary}'),
-            Text(f'{indicator} {proj}', style='bold'),
-            Text('', style=c_muted),
             Text(str(n_gpu) if n_gpu else '', style=f'bold {c_secondary}'),
+            Text(' '),
             state_t,
             Text(elapsed_str, style=c_muted),
+            Text(ago_str, style=c_muted),
+            Text(' '),
+            Text(' '),
+            Text(' '),
             Text('', style=c_muted),
-            Text('', style=c_muted),
-            Text('', style=c_muted),
-            Text('', style=c_muted),
-        )
+        ]
 
-    def _add_project_rows(
-        self, dt: SpeekDataTable, proj: str, items: List[dict],
-        priorities: Dict, part_ranked: Dict, part_rank_index: Dict,
-        new_first_jids: List[str], state_style: Dict, colors: tuple,
-    ) -> None:
+    def _render_job_group(self, node: FoldGroup, is_collapsed: bool, with_fold: bool = True) -> List[Text]:
+        d = node.data
+        g = d['group']
+        colors = d['colors']
         c_muted, c_secondary, c_success, c_warning, c_error = colors
-        collapsed = proj in self._collapsed
-        hdr = self._project_header_row(
-            proj, items, collapsed, c_muted, c_secondary, c_success, c_warning
-        )
-        proj_key = f'{_PROJ}{proj}'
-        dt.add_row(*hdr, key=proj_key)
-        self._row_keys.append(proj_key)
-        if collapsed:
-            return
-        for item in items:
-            self._job_data[item['jid']] = item
-        for g in _aggregate_within(items):
-            first_jid = g['ids'][0]
-            self._group_ids[first_jid] = g['ids']
-            count = len(g['ids'])
-            expanded = first_jid in self._expanded_groups and count > 1
-            fold_icon = '▼ ' if expanded else ('▶ ' if count > 1 else '  ')
-            ids_str = first_jid if count == 1 else f'{first_jid}+{count - 1}'
-            rank = self._rank_cell(g, priorities, part_ranked,
-                                   part_rank_index, c_warning, c_muted)
-            hint = self._log_hints.get(first_jid, '')
-            has_oom = any(jid in self._oom_jobs for jid in g['ids'])
-            state_text = Text()
-            if has_oom:
-                state_text.append('⚠', style=f'bold {c_error}')
-                state_text.append(g['state'], style=f'bold {c_error}')
-            else:
-                state_text = Text(g['state'], style=state_style.get(g['state'], f'dim {c_muted}'))
-            hint_style = f'bold {c_error}' if has_oom else c_muted
-            dt.add_row(
-                Text(str(count), style=f'bold {c_muted}'),
-                Text(f'  {fold_icon}{g["name"]}', style='default'),
-                Text(g['part'], style=c_secondary),
-                Text(g['gpu'], style='bold'),
-                state_text,
-                Text(g['elapsed'], style=c_muted),
-                Text(g['eta'], style=f'{c_warning} italic') if g['eta'] else Text(''),
-                rank,
-                Text(ids_str, style=c_muted),
-                Text(hint[:32], style=hint_style),
-                key=first_jid,
-            )
-            self._row_keys.append(first_jid)
-            new_first_jids.append(first_jid)
-            if expanded:
-                self._add_individual_rows(dt, g, state_style, colors)
+        state_style = d['state_style']
+        priorities = d['priorities']
+        part_ranked = d['part_ranked']
+        part_rank_index = d['part_rank_index']
 
-    def _add_individual_rows(
-        self, dt: SpeekDataTable, g: dict, state_style: Dict, colors: tuple,
-    ) -> None:
+        count = len(g['ids'])
+        first_jid = g['ids'][0]
+        fold_icon = '▼ ' if not is_collapsed else '▶ '
+        ids_str = first_jid if count == 1 else f'{first_jid}+{count - 1}'
+        rank = self._rank_cell(g, priorities, part_ranked, part_rank_index, c_warning, c_muted)
+        hint = self._log_hints.get(first_jid, '')
+        has_oom = any(jid in self._oom_jobs for jid in g['ids'])
+        if has_oom:
+            state_text = state_badge('OUT_OF_MEMORY')
+        else:
+            state_text = state_badge(g['state'])
+        hint_style = f'bold {c_error}' if has_oom else c_muted
+        try:
+            total_gpu = int(g['gpu']) * count
+        except (ValueError, TypeError):
+            total_gpu = 0
+        g_start = g.get('start', '')
+        g_ago = fmt_time(g_start) if g_start and g_start not in ('N/A', 'Unknown') else '—'
+        return [
+            Text(f'  {fold_icon}{g["name"]}', style='default'),
+            Text(str(count), style=f'bold {c_muted}'),
+            Text(str(total_gpu) if total_gpu else g['gpu'], style='bold'),
+            Text(g['part'], style=c_secondary),
+            state_text,
+            Text(g['elapsed'], style=c_muted),
+            Text(g_ago, style=c_muted),
+            Text(g['eta'], style=f'{c_warning} italic') if g['eta'] else Text(''),
+            rank,
+            Text(ids_str, style=c_muted),
+            Text(hint[:32], style=hint_style),
+        ]
+
+    def _render_job_group_leaf(self, node: Leaf) -> List[Text]:
+        """Render a single-job group (no fold icon, just indented)."""
+        d = node.data
+        g = d['group']
+        colors = d['colors']
+        c_muted, c_secondary, c_success, c_warning, c_error = colors
+        state_style = d['state_style']
+        priorities = d['priorities']
+        part_ranked = d['part_ranked']
+        part_rank_index = d['part_rank_index']
+
+        first_jid = g['ids'][0]
+        rank = self._rank_cell(g, priorities, part_ranked, part_rank_index, c_warning, c_muted)
+        hint = self._log_hints.get(first_jid, '')
+        has_oom = any(jid in self._oom_jobs for jid in g['ids'])
+        if has_oom:
+            state_text = state_badge('OUT_OF_MEMORY')
+        else:
+            state_text = state_badge(g['state'])
+        hint_style = f'bold {c_error}' if has_oom else c_muted
+        g_start = g.get('start', '')
+        g_ago = fmt_time(g_start) if g_start and g_start not in ('N/A', 'Unknown') else '—'
+        return [
+            Text(f'    {g["name"]}', style='default'),
+            Text('1', style=f'bold {c_muted}'),
+            Text(g['gpu'], style='bold'),
+            Text(g['part'], style=c_secondary),
+            state_text,
+            Text(g['elapsed'], style=c_muted),
+            Text(g_ago, style=c_muted),
+            Text(g['eta'], style=f'{c_warning} italic') if g['eta'] else Text(''),
+            rank,
+            Text(first_jid, style=c_muted),
+            Text(hint[:32], style=hint_style),
+        ]
+
+    def _render_individual_job(self, node: Leaf) -> List[Text]:
+        d = node.data
+        jid = d['jid']
+        g = d['group']
+        state_style = d['state_style']
+        colors = d['colors']
         c_muted, c_secondary, _, c_warning, _ = colors
-        for jid in g['ids']:
-            it = self._job_data.get(jid, g)
-            state = it.get('state', g['state'])
-            eta = it.get('eta', '')
-            dt.add_row(
-                Text('', style=c_muted),
-                Text(f'    ↳ {jid}', style=c_muted),
-                Text(it.get('part', g['part']), style=c_secondary),
-                Text(it.get('gpu', g['gpu']), style='bold'),
-                Text(state, style=state_style.get(state, f'dim {c_muted}')),
-                Text(it.get('elapsed', g['elapsed']), style=c_muted),
-                Text(eta, style=f'{c_warning} italic') if eta else Text(''),
-                Text('', style=c_muted),
-                Text(jid, style=c_muted),
-                Text('', style=c_muted),
-                key=f'ind::{jid}',
-            )
-            self._row_keys.append(f'ind::{jid}')
+
+        it = self._job_data.get(jid, g)
+        state = it.get('state', g['state'])
+        eta = it.get('eta', '')
+        it_start = it.get('start', '')
+        it_ago = fmt_time(it_start) if it_start and it_start not in ('N/A', 'Unknown') else '—'
+        return [
+            Text(f'  {"└" if node.is_last else "├"}── {jid}', style=c_muted),
+            Text('', style=c_muted),
+            Text(it.get('gpu', g['gpu']), style='bold'),
+            Text(it.get('part', g['part']), style=c_secondary),
+            state_badge(state),
+            Text(it.get('elapsed', g['elapsed']), style=c_muted),
+            Text(it_ago, style=c_muted),
+            Text(eta, style=f'{c_warning} italic') if eta else Text(''),
+            Text('', style=c_muted),
+            Text(jid, style=c_muted),
+            Text('', style=c_muted),
+        ]
+
+    # ── History tab: tree building ────────────────────────────────────────────
+
+    def _build_history_tree(self, rows: List[Tuple]) -> List[TreeNode]:
+        """Build tree for the History tab."""
+        import re as _re
+
+        # Group by project
+        projects: OrderedDict[str, list] = OrderedDict()
+        for r in rows:
+            jid, name, part = r[0], r[1], r[2]
+            start, elapsed, state = r[3], r[4], r[5]
+            gpu_str = r[7] if len(r) > 7 else ''
+            gpu_model = ''
+            gpu_count = '0'
+            m = _re.search(r'gres/gpu(?::([^:,]+))?(?::(\d+)|=(\d+))', gpu_str)
+            if m:
+                gpu_model = m.group(1) or ''
+                gpu_count = m.group(2) or m.group(3) or '1'
+            proj = _name_base(name) or name
+            projects.setdefault(proj, []).append({
+                'jid': jid, 'name': name, 'part': gpu_model or part,
+                'state': state, 'elapsed': elapsed, 'start': start,
+                'gpu': gpu_count,
+            })
+
+        # Sort projects by most recent activity (latest start or end time)
+        def _latest_activity(items):
+            from datetime import datetime as _dt, timedelta as _td
+            latest = ''
+            for it in items:
+                s = it.get('start', '')
+                if s and s not in ('N/A', 'Unknown', 'None'):
+                    # Compute end = start + elapsed
+                    try:
+                        st = _dt.strptime(s.replace('T', ' ').split('.')[0], '%Y-%m-%d %H:%M:%S')
+                        e_secs = self._parse_elapsed(it.get('elapsed', ''))
+                        end = (st + _td(seconds=e_secs)).strftime('%Y-%m-%d %H:%M:%S')
+                        candidate = max(s, end)
+                    except Exception:
+                        candidate = s
+                    if candidate > latest:
+                        latest = candidate
+            return latest
+
+        sorted_projects = sorted(projects.items(),
+                                  key=lambda kv: _latest_activity(kv[1]),
+                                  reverse=True)
+
+        # On first load, start with all projects collapsed
+        if self._hist_first_load:
+            self._hist_first_load = False
+            for proj, _ in sorted_projects:
+                self._history_ctx.collapsed.add(proj)
+
+        tree: List[TreeNode] = []
+        current_zone = -1
+        div_counter = 0
+
+        for proj, items in sorted_projects:
+            # Time divider based on most recent activity in project
+            zone = _hist_zone_idx(_latest_activity(items))
+            if zone != current_zone:
+                if current_zone >= 0:
+                    tree.append(Spacer(key=f'{_HIST_DIV_PREFIX}{div_counter}_sp'))
+                current_zone = zone
+                from datetime import datetime as _dt, timedelta as _td
+                _now = _dt.now()
+                _bounds = [b for b, _ in _HIST_TIME_ZONES]
+                _labels = ['1h', '2h', '6h', '12h', '1d', '3d', '7d', '7d+']
+                age = _labels[min(zone, len(_labels)-1)]
+                if zone >= 5:
+                    secs = _bounds[zone]
+                    date_dt = _now - _td(seconds=secs) if secs != float('inf') else _now - _td(seconds=_bounds[zone-1])
+                    date_str = date_dt.strftime('%y-%m-%d')
+                elif zone >= 4:
+                    date_str = (_now - _td(seconds=_bounds[zone])).strftime('%y-%m-%d')
+                else:
+                    date_str = _now.strftime('%H:%M')
+                tree.append(Divider(
+                    key=f'{_HIST_DIV_PREFIX}{div_counter}',
+                    label=f'{age} {date_str}',
+                ))
+                div_counter += 1
+
+            n = len(items)
+            if n > 1:
+                # Project FoldGroup (COLLAPSED_SET)
+                # Sub-group similar jobs within the project
+                sub_groups: list[list] = []
+                for item in items:
+                    merged = False
+                    for sg in sub_groups:
+                        if sg[0]['name'] == item['name'] or (
+                            _name_base(sg[0]['name']) and _name_base(sg[0]['name']) == _name_base(item['name'])
+                        ):
+                            sg.append(item)
+                            merged = True
+                            break
+                    if not merged:
+                        sub_groups.append([item])
+
+                proj_children: List[TreeNode] = []
+                for sg in sub_groups:
+                    sg_n = len(sg)
+                    first = sg[0]
+                    if sg_n > 1:
+                        sg_key = f'hgrp_{first["jid"]}'
+                        ind_children = [
+                            Leaf(key=f'hist_{item["jid"]}', data=item, indent=7)
+                            for item in sg
+                        ]
+                        proj_children.append(FoldGroup(
+                            key=sg_key,
+                            fold_key=sg_key,
+                            data={'items': sg, 'first': first},
+                            children=ind_children,
+                            mode=FoldMode.COLLAPSED_SET,
+                            indent=5,
+                        ))
+                    else:
+                        proj_children.append(Leaf(
+                            key=f'hist_{first["jid"]}',
+                            data=first,
+                            indent=5,
+                        ))
+
+                tree.append(FoldGroup(
+                    key=f'hproj::{proj}',
+                    fold_key=proj,
+                    data={'proj': proj, 'items': items},
+                    children=proj_children,
+                    mode=FoldMode.COLLAPSED_SET,
+                    indent=3,
+                ))
+            else:
+                # Single-item project — just a leaf under the divider
+                first = items[0]
+                tree.append(Leaf(
+                    key=f'hist_{first["jid"]}',
+                    data=first,
+                    indent=5,
+                ))
+
+        return tree
+
+    def _render_history_cell(self, node: TreeNode, is_collapsed: bool, n_cols: int) -> List[Text]:
+        """Render a History tab tree node."""
+        tv = self.app.theme_variables
+        c_muted = tc(tv, 'text-muted', 'bright_black')
+        c_success = tc(tv, 'text-success', 'green')
+        c_warning = tc(tv, 'text-warning', 'yellow')
+        c_error = tc(tv, 'text-error', 'red')
+        state_style = {
+            'RUNNING': f'bold {c_success}',
+            'PENDING': f'bold {c_warning}',
+            'COMPLETED': 'bold #4A9FD9',
+            'FAILED': f'bold {c_error}',
+            'TIMEOUT': f'bold {c_error}',
+            'CANCELLED': f'bold {c_muted}',
+            'OUT_OF_MEMORY': f'bold {c_error}',
+        }
+
+        if isinstance(node, FoldGroup) and node.key.startswith('hproj::'):
+            return self._render_hist_project(node, is_collapsed,
+                                              c_muted, c_success, c_warning, c_error)
+
+        if isinstance(node, FoldGroup) and node.key.startswith('hgrp_'):
+            return self._render_hist_subgroup(node, is_collapsed,
+                                               c_muted, c_error, state_style)
+
+        if isinstance(node, Leaf):
+            item = node.data
+            ss = state_style.get(item['state'].split()[0], c_muted)
+            h_start = item.get('start', '')
+            h_ago = fmt_time(h_start) if h_start and h_start not in ('N/A', 'Unknown') else '—'
+            if node.indent == 7:
+                # Individual job under sub-group
+                return [
+                    Text(f'     {"└" if node.is_last else "├"}── {item["name"]}', style=c_muted),
+                    Text('', style=c_muted),
+                    Text(item['gpu'], style=c_muted),
+                    Text(item['part'], style=c_muted),
+                    state_badge(item['state']),
+                    Text(item['elapsed'], style=c_muted),
+                    Text(h_ago, style=c_muted),
+                    Text(item['jid'], style=c_muted),
+                ]
+            else:
+                # Single job (indent=5)
+                return [
+                    Text(f'     {item["name"]}'),
+                    Text('', style=c_muted),
+                    Text(item['gpu'], style=c_muted),
+                    Text(item['part'], style=c_muted),
+                    state_badge(item['state']),
+                    Text(item['elapsed'], style=c_muted),
+                    Text(h_ago, style=c_muted),
+                    Text(item['jid'], style=c_muted),
+                ]
+
+        return [Text('') for _ in range(n_cols)]
+
+    def _render_hist_project(
+        self, node: FoldGroup, is_collapsed: bool,
+        c_muted: str, c_success: str, c_warning: str, c_error: str,
+    ) -> List[Text]:
+        d = node.data
+        items = d['items']
+        proj = d['proj']
+        n = len(items)
+        n_ok = sum(1 for i in items if i['state'] == 'COMPLETED')
+        n_fail = sum(1 for i in items if i['state'] in ('FAILED', 'TIMEOUT', 'OUT_OF_MEMORY'))
+        n_run = sum(1 for i in items if i['state'] == 'RUNNING')
+        n_pend = sum(1 for i in items if i['state'] == 'PENDING')
+        state_t = Text()
+        if n_run:
+            state_t.append(f'{n_run}', style=f'bold {c_success}')
+            state_t.append('R ', style=c_muted)
+        if n_ok:
+            state_t.append(f'{n_ok}', style=c_muted)
+            state_t.append('C ', style=c_muted)
+        if n_fail:
+            state_t.append(f'{n_fail}', style=f'bold {c_error}')
+            state_t.append('F ', style=c_muted)
+        if n_pend:
+            state_t.append(f'{n_pend}', style=c_warning)
+            state_t.append('P', style=c_muted)
+
+        from datetime import datetime as _dt2, timedelta as _td2
+        earliest = None
+        latest = None
+        for it in items:
+            try:
+                s = _dt2.strptime(it['start'].replace('T', ' ').split('.')[0], '%Y-%m-%d %H:%M:%S')
+                e_secs = self._parse_elapsed(it['elapsed'])
+                end = s + _td2(seconds=e_secs)
+                if earliest is None or s < earliest:
+                    earliest = s
+                if latest is None or end > latest:
+                    latest = end
+            except Exception:
+                pass
+        proj_elapsed = ''
+        if earliest and latest:
+            proj_elapsed = self._fmt_elapsed(int((latest - earliest).total_seconds()))
+
+        n_gpu = sum(int(it['gpu']) for it in items if it.get('gpu', '').isdigit())
+        # Earliest start across all items
+        earliest_start = ''
+        for it in items:
+            s = it.get('start', '')
+            if s and s not in ('N/A', 'Unknown') and (not earliest_start or s < earliest_start):
+                earliest_start = s
+        proj_ago = fmt_time(earliest_start) if earliest_start else '—'
+
+        icon = '▶' if is_collapsed else '▼'
+        return [
+            Text(f'   {icon} {proj}', style='bold'),
+            Text(str(n), style=f'bold {c_muted}'),
+            Text(str(n_gpu) if n_gpu else '', style=f'bold {c_muted}'),
+            Text(items[0]['part'], style=c_muted),
+            state_t,
+            Text(proj_elapsed, style=c_muted),
+            Text(proj_ago, style=c_muted),
+            Text(' '),
+        ]
+
+    def _render_hist_subgroup(
+        self, node: FoldGroup, is_collapsed: bool,
+        c_muted: str, c_error: str, state_style: dict,
+    ) -> List[Text]:
+        d = node.data
+        sg = d['items']
+        first = d['first']
+        sg_n = len(sg)
+        sg_ok = sum(1 for i in sg if i['state'] == 'COMPLETED')
+        sg_fail = sum(1 for i in sg if i['state'] in ('FAILED', 'TIMEOUT', 'OUT_OF_MEMORY'))
+        sg_state = Text()
+        if sg_ok:
+            sg_state.append(f'{sg_ok}', style=c_muted)
+            sg_state.append('C ', style=c_muted)
+        if sg_fail:
+            sg_state.append(f'{sg_fail}', style=f'bold {c_error}')
+            sg_state.append('F', style=c_muted)
+        icon = '▶' if is_collapsed else '▼'
+        sg_gpu = sum(int(it['gpu']) for it in sg if it.get('gpu', '').isdigit())
+        sg_start = first.get('start', '')
+        sg_ago = fmt_time(sg_start) if sg_start and sg_start not in ('N/A', 'Unknown') else '—'
+        return [
+            Text(f'     {icon} {first["name"]}', style=''),
+            Text(f' {sg_n}', style=c_muted),
+            Text(str(sg_gpu) if sg_gpu else '', style=c_muted),
+            Text(first['part'], style=c_muted),
+            sg_state,
+            Text('', style=c_muted),
+            Text(sg_ago, style=c_muted),
+            Text(f'{first["jid"]}+{sg_n-1}', style=c_muted),
+        ]
+
+    # ── Update methods ────────────────────────────────────────────────────────
 
     def _update(
         self, sig: frozenset, rows: List[Tuple], priorities: Optional[Dict],
         projects: Dict, part_ranked: Dict, part_rank_index: Dict,
         stats_text: Optional[Text], n_run: int, n_pend: int, colors: tuple,
     ) -> None:
-        if sig == getattr(self, '_last_myjobs_sig', None):
+        if sig == self._last_myjobs_sig:
             self._last_rows = rows
             self._last_priorities = priorities or {}
             return
@@ -489,39 +928,25 @@ class MyJobsWidget(Widget):
         self._last_rows = rows
         self._last_priorities = priorities or {}
 
-        _, _, c_success, c_warning, c_error = colors
-        state_style = {
-            'RUNNING': f'bold {c_success}',
-            'PENDING': c_warning,
-            'FAILED':  f'bold {c_error}',
-        }
-
         dt    = self.query_one(SpeekDataTable)
         empty = self.query_one('#myjobs-empty', Static)
         empty.display = not rows
         if not rows:
             empty.update(f'No active or pending jobs for {self.user}')
 
-        self._collapsed &= set(projects.keys())
-
-        # Evict stale log hints and per-job data
+        # Prune stale data
+        self._current_ctx.collapsed &= set(projects.keys())
         live_jids = {it['jid'] for items in projects.values() for it in items}
         self._log_hints = {k: v for k, v in self._log_hints.items() if k in live_jids}
         self._job_data = {}
-        self._row_keys = []
         self._group_ids = {}
-        new_first_jids: List[str] = []
 
-        with self.app.batch_update():
-            dt.clear()
-            for proj, items in projects.items():
-                self._add_project_rows(
-                    dt, proj, items, priorities,
-                    part_ranked, part_rank_index,
-                    new_first_jids, state_style, colors,
-                )
+        self._current_tree = self._build_current_tree(
+            projects, priorities, part_ranked, part_rank_index, colors,
+        )
+        self._rebuild(dt, self._current_ctx, self._current_tree)
 
-        self._expanded_groups &= set(self._group_ids.keys())
+        self._current_ctx.expanded &= set(self._group_ids.keys())
         self.query_one(LoadingIndicator).display = False
 
         stats_bar = self.query_one('#myjobs-stats', Static)
@@ -533,7 +958,7 @@ class MyJobsWidget(Widget):
 
         self.post_message(self.RunningCount(n_run, n_pend))
 
-        uncached = [j for j in new_first_jids if j not in self._log_hints]
+        uncached = [j for j in self._new_first_jids if j not in self._log_hints]
         if uncached:
             self.run_worker(
                 lambda jids=uncached: self._fetch_log_hints(jids),
@@ -604,23 +1029,26 @@ class MyJobsWidget(Widget):
                 pass
         return self.query_one(_MYJOBS_DT, SpeekDataTable)
 
-    def _active_row_keys(self) -> List[str]:
+    def _active_ctx(self) -> TableContext:
         if self._active_tab() == 'history':
-            return getattr(self, '_hist_row_keys', [])
-        return self._row_keys
+            return self._history_ctx
+        return self._current_ctx
 
-    def _selected_key(self) -> Optional[str]:
+    def _active_tree(self) -> List[TreeNode]:
+        if self._active_tab() == 'history':
+            return self._history_tree
+        return self._current_tree
+
+    def _active_row_keys(self) -> List[str]:
+        return self._active_ctx().row_keys
+
+    def _selected_key_val(self) -> Optional[str]:
         dt = self._active_dt()
-        keys = self._active_row_keys()
-        if dt.row_count == 0:
-            return None
-        try:
-            return keys[dt.cursor_row]
-        except (IndexError, AttributeError):
-            return None
+        ctx = self._active_ctx()
+        return self._selected_key(dt, ctx)
 
     def _selected_job_id(self) -> Optional[str]:
-        key = self._selected_key()
+        key = self._selected_key_val()
         if not key:
             return None
         # History tab keys
@@ -634,7 +1062,11 @@ class MyJobsWidget(Widget):
         if key.startswith(_PROJ):
             keys = self._active_row_keys()
             dt = self._active_dt()
-            for i in range(dt.cursor_row + 1, len(keys)):
+            try:
+                cursor_row = dt.cursor_row
+            except Exception:
+                return None
+            for i in range(cursor_row + 1, len(keys)):
                 v = keys[i]
                 if v.startswith(_PROJ):
                     break
@@ -648,7 +1080,8 @@ class MyJobsWidget(Widget):
         """Return all job IDs under a project row key."""
         result: List[str] = []
         past_header = False
-        for k in self._row_keys:
+        keys = self._current_ctx.row_keys
+        for k in keys:
             if k == proj_key:
                 past_header = True
                 continue
@@ -662,7 +1095,7 @@ class MyJobsWidget(Widget):
 
     def _all_jids_in_selection(self) -> List[str]:
         """Return all job IDs for the current cursor position."""
-        key = self._selected_key()
+        key = self._selected_key_val()
         if not key:
             return []
         if key.startswith(_IND):
@@ -674,59 +1107,29 @@ class MyJobsWidget(Widget):
     # ── Actions ───────────────────────────────────────────────────────────────
 
     def action_fold_all(self) -> None:
-        """Fold or unfold ALL groups at once. If any are open, fold all. If all folded, unfold all."""
-        if self._active_tab() == 'history':
-            # Check if any are unfolded
-            all_proj_keys = [k[7:] for k in self._hist_row_keys if k.startswith('hproj::')]
-            all_grp_keys = [k for k in self._hist_row_keys if k.startswith('hgrp_')]
-            all_keys = set(all_proj_keys + all_grp_keys)
-            if all_keys - self._hist_collapsed:
-                # Some open → fold all
-                self._hist_collapsed |= all_keys
-            else:
-                # All folded → unfold all
-                self._hist_collapsed.clear()
-            self._last_hist_sig = ''
-            self._load_history()
-        else:
-            # Current tab: check projects
-            all_projs = {k[len(_PROJ):] for k in self._row_keys if k.startswith(_PROJ)}
-            if all_projs - self._collapsed:
-                self._collapsed |= all_projs
-            else:
-                self._collapsed.clear()
-            self._rebuild_from_last()
+        """Fold or unfold ALL groups at once."""
+        dt = self._active_dt()
+        ctx = self._active_ctx()
+        tree = self._active_tree()
+        self._fold_all_and_rebuild(dt, ctx, tree)
 
     def action_toggle_fold(self) -> None:
         """Toggle fold/unfold for the selected row."""
-        key = self._selected_key()
+        key = self._selected_key_val()
         if not key:
             return
+        dt = self._active_dt()
+        ctx = self._active_ctx()
+        tree = self._active_tree()
 
-        # History tab project rows or sub-group rows
+        # History tab: project or sub-group rows
         if key.startswith('hproj::') or key.startswith('hgrp_'):
-            toggle_key = key[7:] if key.startswith('hproj::') else key
-            if toggle_key in self._hist_collapsed:
-                self._hist_collapsed.discard(toggle_key)
-            else:
-                self._hist_collapsed.add(toggle_key)
-            self._last_hist_sig = ''
-            self._load_history()
+            self._toggle_and_rebuild(dt, ctx, tree, key)
             return
 
         # Current tab: project row
         if key.startswith(_PROJ):
-            proj = key[len(_PROJ):]
-            if proj in self._collapsed:
-                self._collapsed.discard(proj)
-            else:
-                self._collapsed.add(proj)
-            self._rebuild_from_last()
-            try:
-                self.query_one(_MYJOBS_DT, SpeekDataTable).move_cursor(
-                    row=self._row_keys.index(key))
-            except Exception:
-                pass
+            self._toggle_and_rebuild(dt, ctx, tree, key)
             return
 
         # Current tab: individual sub-row → no-op
@@ -735,16 +1138,7 @@ class MyJobsWidget(Widget):
 
         # Current tab: job group row → toggle group expand
         if len(self._group_ids.get(key, [])) > 1:
-            if key in self._expanded_groups:
-                self._expanded_groups.discard(key)
-            else:
-                self._expanded_groups.add(key)
-            self._rebuild_from_last()
-            try:
-                self.query_one(_MYJOBS_DT, SpeekDataTable).move_cursor(
-                    row=self._row_keys.index(key))
-            except Exception:
-                pass
+            self._toggle_and_rebuild(dt, ctx, tree, key)
 
     def action_refresh(self) -> None:
         self._load()
@@ -752,12 +1146,12 @@ class MyJobsWidget(Widget):
     def _visible_job_ids(self) -> List[str]:
         """Ordered list of job IDs currently visible in the table (for popup cycling)."""
         job_ids: List[str] = []
-        for k in self._row_keys:
+        for k in self._current_ctx.row_keys:
             if k.startswith(_PROJ):
                 continue
             if k.startswith(_IND):
                 job_ids.append(k.removeprefix(_IND))
-            elif k not in self._expanded_groups:
+            elif k not in self._current_ctx.expanded:
                 job_ids.append(k)
         return job_ids
 
@@ -840,18 +1234,10 @@ class MyJobsWidget(Widget):
 
     @safe('MyJobs history')
     def _populate_history(self, rows: List[Tuple]) -> None:
-        import re as _re
-
         sig = str(len(rows)) + '|' + (rows[0][0] if rows else '')
         if sig == self._last_hist_sig:
             return
         self._last_hist_sig = sig
-
-        tv = self.app.theme_variables
-        c_muted = tc(tv, 'text-muted', 'bright_black')
-        c_success = tc(tv, 'text-success', 'green')
-        c_warning = tc(tv, 'text-warning', 'yellow')
-        c_error = tc(tv, 'text-error', 'red')
 
         dt = self.query_one(_MYHIST_DT, SpeekDataTable)
         empty = self.query_one('#myjobs-hist-empty', Static)
@@ -863,205 +1249,5 @@ class MyJobsWidget(Widget):
             return
         empty.display = False
 
-        state_style = {
-            'RUNNING': f'bold {c_success}',
-            'PENDING': c_warning,
-            'COMPLETED': c_muted,
-            'FAILED': f'bold {c_error}',
-            'TIMEOUT': f'bold {c_error}',
-            'CANCELLED': f'dim {c_error}',
-            'OUT_OF_MEMORY': f'bold {c_error}',
-        }
-
-        # Group by project name (same logic as Current tab)
-        projects: OrderedDict[str, list] = OrderedDict()
-        for r in rows:
-            jid, name, part = r[0], r[1], r[2]
-            start, elapsed, state = r[3], r[4], r[5]
-            gpu_str = r[7] if len(r) > 7 else ''
-            gpu = ''
-            m = _re.search(r'gres/gpu(?::([^:,]+))?(?::(\d+)|=(\d+))', gpu_str)
-            if m:
-                gpu = f'{m.group(1) or "gpu"}:{m.group(2) or m.group(3) or "?"}'
-            proj = _name_base(name) or name
-            projects.setdefault(proj, []).append({
-                'jid': jid, 'name': name, 'part': part,
-                'state': state, 'elapsed': elapsed, 'start': start, 'gpu': gpu,
-            })
-
-        # On first load, start with all projects folded
-        if self._hist_first_load:
-            self._hist_first_load = False
-            for proj in projects:
-                self._hist_collapsed.add(proj)
-
-        self._hist_row_keys = []
-        with self.app.batch_update():
-            dt.clear()
-            current_zone = -1
-            div_counter = 0
-
-            for proj, items in projects.items():
-                # Time divider
-                zone = _hist_zone_idx(items[0]['start'])
-                if zone != current_zone:
-                    if current_zone >= 0:
-                        sp_key = f'{_HIST_DIV_PREFIX}{div_counter}_sp'
-                        dt.add_row(*[Text('') for _ in range(7)], key=sp_key)
-                        self._hist_row_keys.append(sp_key)
-                    current_zone = zone
-                    from datetime import datetime as _dt, timedelta as _td
-                    _now = _dt.now()
-                    _bounds = [b for b, _ in _HIST_TIME_ZONES]
-                    _labels = ['1h', '2h', '6h', '12h', '1d', '3d', '7d', '7d+']
-                    age = _labels[min(zone, len(_labels)-1)]
-                    # Compute date string
-                    if zone >= 5:
-                        secs = _bounds[zone]
-                        date_dt = _now - _td(seconds=secs) if secs != float('inf') else _now - _td(seconds=_bounds[zone-1])
-                        date_str = date_dt.strftime('%y-%m-%d')
-                    elif zone >= 4:
-                        date_str = (_now - _td(seconds=_bounds[zone])).strftime('%y-%m-%d')
-                    else:
-                        date_str = _now.strftime('%H:%M')
-                    _s = 'bold'
-                    div_cells = [Text('') for _ in range(7)]
-                    div_cells[0] = Text(age, style=_s)
-                    div_cells[1] = Text(f'▎{date_str}', style=_s)
-                    key = f'{_HIST_DIV_PREFIX}{div_counter}'
-                    dt.add_row(*div_cells, key=key)
-                    self._hist_row_keys.append(key)
-                    div_counter += 1
-
-                n = len(items)
-                collapsed = proj in self._hist_collapsed
-
-                # Project header row (same style as Current tab)
-                if n > 1:
-                    fold = '▶' if collapsed else '▼'
-                    n_ok = sum(1 for i in items if i['state'] == 'COMPLETED')
-                    n_fail = sum(1 for i in items if i['state'] in ('FAILED', 'TIMEOUT', 'OUT_OF_MEMORY'))
-                    n_run = sum(1 for i in items if i['state'] == 'RUNNING')
-                    n_pend = sum(1 for i in items if i['state'] == 'PENDING')
-                    # State summary like Current tab: 2C 1F 1R
-                    state_t = Text()
-                    if n_run:
-                        state_t.append(f'{n_run}', style=f'bold {c_success}')
-                        state_t.append('R ', style=c_muted)
-                    if n_ok:
-                        state_t.append(f'{n_ok}', style=c_muted)
-                        state_t.append('C ', style=c_muted)
-                    if n_fail:
-                        state_t.append(f'{n_fail}', style=f'bold {c_error}')
-                        state_t.append('F ', style=c_muted)
-                    if n_pend:
-                        state_t.append(f'{n_pend}', style=c_warning)
-                        state_t.append('P', style=c_muted)
-
-                    # Compute project elapsed: earliest start → latest end
-                    from datetime import datetime as _dt2, timedelta as _td2
-                    earliest = None
-                    latest = None
-                    for it in items:
-                        try:
-                            s = _dt2.strptime(it['start'].replace('T', ' ').split('.')[0], '%Y-%m-%d %H:%M:%S')
-                            e_secs = self._parse_elapsed(it['elapsed'])
-                            end = s + _td2(seconds=e_secs)
-                            if earliest is None or s < earliest:
-                                earliest = s
-                            if latest is None or end > latest:
-                                latest = end
-                        except Exception:
-                            pass
-                    proj_elapsed = ''
-                    if earliest and latest:
-                        proj_elapsed = self._fmt_elapsed(int((latest - earliest).total_seconds()))
-
-                    proj_key = f'hproj::{proj}'
-                    dt.add_row(
-                        Text(str(n), style=f'bold {c_muted}'),
-                        Text(f'{fold} {proj[:12]}', style='bold'),
-                        Text(items[0]['part'][:6], style=c_muted),
-                        Text('', style=c_muted),
-                        state_t,
-                        Text(proj_elapsed, style=c_muted),
-                        Text('', style=c_muted),
-                        key=proj_key,
-                    )
-                    self._hist_row_keys.append(proj_key)
-                    if collapsed:
-                        continue
-
-                # Group similar jobs within the project (two-level grouping)
-                sub_groups: list[list] = []
-                for item in items:
-                    merged = False
-                    for sg in sub_groups:
-                        if sg[0]['name'] == item['name'] or (
-                            _name_base(sg[0]['name']) and _name_base(sg[0]['name']) == _name_base(item['name'])
-                        ):
-                            sg.append(item)
-                            merged = True
-                            break
-                    if not merged:
-                        sub_groups.append([item])
-
-                for sg in sub_groups:
-                    sg_n = len(sg)
-                    first = sg[0]
-
-                    if sg_n > 1:
-                        # Sub-group header
-                        sg_ok = sum(1 for i in sg if i['state'] == 'COMPLETED')
-                        sg_fail = sum(1 for i in sg if i['state'] in ('FAILED', 'TIMEOUT', 'OUT_OF_MEMORY'))
-                        sg_state = Text()
-                        if sg_ok:
-                            sg_state.append(f'{sg_ok}', style=c_muted)
-                            sg_state.append('C ', style=c_muted)
-                        if sg_fail:
-                            sg_state.append(f'{sg_fail}', style=f'bold {c_error}')
-                            sg_state.append('F', style=c_muted)
-                        sg_key = f'hgrp_{first["jid"]}'
-                        sg_collapsed = sg_key in self._hist_collapsed
-                        sg_fold = '▶' if sg_collapsed else '▼'
-                        dt.add_row(
-                            Text(f' {sg_n}', style=c_muted),
-                            Text(f'{sg_fold} {first["name"][:12]}', style=''),
-                            Text(first['part'][:6], style=c_muted),
-                            Text(first['gpu'][:6], style=c_muted),
-                            sg_state,
-                            Text('', style=c_muted),
-                            Text(f'{first["jid"]}+{sg_n-1}', style=c_muted),
-                            key=sg_key,
-                        )
-                        self._hist_row_keys.append(sg_key)
-                        if sg_collapsed:
-                            continue
-                        # Individual jobs under sub-group
-                        for item in sg:
-                            ss = state_style.get(item['state'], c_muted)
-                            dt.add_row(
-                                Text('', style=c_muted),
-                                Text(f'  {item["name"][:12]}', style=c_muted),
-                                Text(item['part'][:6], style=c_muted),
-                                Text(item['gpu'][:6], style=c_muted),
-                                Text(item['state'][:9], style=ss),
-                                Text(item['elapsed'][:9], style=c_muted),
-                                Text(item['jid'], style=c_muted),
-                                key=f'hist_{item["jid"]}',
-                            )
-                            self._hist_row_keys.append(f'hist_{item["jid"]}')
-                    else:
-                        # Single job — no sub-group header needed
-                        ss = state_style.get(first['state'], c_muted)
-                        dt.add_row(
-                            Text('', style=c_muted),
-                            Text(first['name'][:14]),
-                            Text(first['part'][:6], style=c_muted),
-                            Text(first['gpu'][:6], style=c_muted),
-                            Text(first['state'][:9], style=ss),
-                            Text(first['elapsed'][:9], style=c_muted),
-                            Text(first['jid'], style=c_muted),
-                            key=f'hist_{first["jid"]}',
-                        )
-                        self._hist_row_keys.append(f'hist_{first["jid"]}')
+        self._history_tree = self._build_history_tree(rows)
+        self._rebuild(dt, self._history_ctx, self._history_tree)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections import defaultdict
 from datetime import datetime
@@ -22,8 +23,12 @@ from textual.widgets import (
 )
 
 from speek.speek_max.slurm import fetch_history
-from speek.speek_max._utils import tc, safe
+from speek.speek_max._utils import tc, safe, state_sym, state_badge, STATE_SYMBOL
 from speek.speek_max.widgets.datatable import SpeekDataTable
+from speek.speek_max.widgets.foldable_table import (
+    FoldableTableMixin, FoldGroup, FoldMode, Leaf, Divider, Spacer,
+    TreeNode, TableContext, _build_divider_cells,
+)
 
 # ── Persistence ────────────────────────────────────────────────────────────────
 
@@ -141,26 +146,25 @@ def _time_zone_idx(start_str: str) -> int:
     return len(_TIME_ZONE_BOUNDS) - 1
 
 
-_HISTORY_COL_WIDTHS = [3, 3, 2, 12, 6, 5, 7, 7, 8]
+_HISTORY_COL_WIDTHS = [12, 3, 3, 2, 6, 5, 7, 7, 8]
 
-def _divider_row(age: str, date: str, n_cols: int = 9) -> tuple:
-    """Return a tuple of Text cells for a time-divider separator row.
-
-    age goes in the Ago column (1), date goes in Name column (3).
-    """
-    s = 'bold'
-    cells = [Text('') for _ in range(n_cols)]
-    cells[1] = Text(age, style=s)
-    cells[3] = Text(f'▎{date}', style=s)
-    return tuple(cells)
+_N_HISTORY_COLS = 9  # Name + E + Ago + #J + #G + Part + Nodes + Elapsed + IDs
 
 
 def _parse_gpu(alloc_tres: str) -> str:
-    """Return gpu model name from AllocTRES string (e.g. 'gres/gpu:a100=2' → 'a100')."""
+    """Return gpu model name from AllocTRES string (e.g. 'gres/gpu:a100=2' -> 'a100')."""
     m = _GPU_RE.search(alloc_tres)
     if m and m.group(1):
         return m.group(1).lower()
     return ''
+
+
+def _parse_gpu_count(alloc_tres: str) -> int:
+    """Return gpu count from AllocTRES string (e.g. 'gres/gpu:a100=2' -> 2)."""
+    m = _GPU_RE.search(alloc_tres)
+    if m:
+        return int(m.group(2) or m.group(3) or 1)
+    return 0
 
 
 def _fmt_gpu(models: set) -> str:
@@ -171,35 +175,31 @@ def _fmt_nodes(nodes: set) -> str:
     return ','.join(sorted(n for n in nodes if n and n != 'None')) or ''
 
 
-# Maps state → (letter, bg_tv_key, bg_fallback)
+# Maps state -> (letter, bg_tv_key, bg_fallback)
 # Badge renders as: dark text ON colored background
 _TYPE_BADGE: Dict[str, Tuple[str, str, str]] = {
-    'COMPLETED':     ('C', 'primary',  'blue'),
-    'FAILED':        ('F', 'error',    'red'),
-    'TIMEOUT':       ('T', 'warning',  'yellow'),
-    'CANCELLED':     ('X', 'text-muted', 'bright_black'),
-    'OUT_OF_MEMORY': ('M', 'error',    'red'),
-    'PENDING':       ('P', 'warning',  'yellow'),
-    'RUNNING':       ('S', 'success',  'green'),
+    'COMPLETED':     ('✔', '_cyan',    '#4A9FD9'),
+    'FAILED':        ('✗', 'error',    'red'),
+    'TIMEOUT':       ('⏱', 'warning',  'yellow'),
+    'CANCELLED':     ('⊘', 'text-muted', 'bright_black'),
+    'OUT_OF_MEMORY': ('☢', 'error',    'red'),
+    'PENDING':       ('⏸', 'warning',  'yellow'),
+    'RUNNING':       ('▶', 'success',  'green'),
+    'NODE_FAIL':     ('⚡', 'error',    'red'),
+    'PREEMPTED':     ('⏏', 'warning',  'yellow'),
+    'SUSPENDED':     ('⏯', 'warning',  'yellow'),
+    'REQUEUED':      ('↻', 'warning',  'yellow'),
 }
 
-# (col_header, width) — order matches _setup_dt and _populate_dt
 _COL_WIDTHS: Dict[str, int] = {
-    'ago': 3, 'name': 12, 'gpu': 6, 'nodes': 5, 'count': 2, 'state': 7, 'elapsed': 7, 'ids': 8,
+    'ago': 3, 'name': 12, 'gpu': 6, 'nodes': 5, 'count': 2, 'state': 3, 'elapsed': 7, 'ids': 8,
 }
-_N_HISTORY_COLS = 9  # E + Ago + # + Name + GPU + Nodes + State + Elapsed + IDs
 
 
 def _type_badge(state: str, tv: dict) -> Text:
     """Return a symbol badge with colored background for the given job state."""
-    normalized = state.split()[0] if state else ''
-    entry = _TYPE_BADGE.get(normalized)
-    if entry:
-        symbol, bg_key, bg_fb = entry
-        bg = tc(tv, bg_key, bg_fb)
-        fg = tc(tv, 'background', 'black')
-        return Text(f' {symbol} ', style=f'bold {fg} on {bg}')
-    return Text(' ? ', style='dim')
+    from speek.speek_max._utils import state_badge
+    return state_badge(state)
 
 
 def _rel_time(start_str: str, mode: str = 'relative') -> str:
@@ -225,7 +225,7 @@ def _rel_time(start_str: str, mode: str = 'relative') -> str:
 
 
 def _fmt_ids(ids: List[str], max_len: int = 22) -> str:
-    """Compact range notation: 1234-1238,1241+2…"""
+    """Compact range notation: 1234-1238,1241+2..."""
     try:
         ints = sorted(int(i) for i in ids)
     except ValueError:
@@ -243,7 +243,7 @@ def _fmt_ids(ids: List[str], max_len: int = 22) -> str:
     for i, p in enumerate(parts):
         buf = (result + ',' + p) if result else p
         if len(buf) > max_len:
-            result += f'+{len(parts) - i}…'
+            result += f'+{len(parts) - i}...'
             break
         result = buf
     return result
@@ -260,18 +260,21 @@ def _find_matching_group(grouped: List[dict], part: str, state: str, tb: int, na
 
 
 def _new_group(jid: str, name: str, part: str, start: str, elapsed: str,
-               state: str, tb: int, gpu_model: str, nodelist: str) -> dict:
+               state: str, tb: int, gpu_model: str, nodelist: str,
+               gpu_count: int = 0) -> dict:
     return {
         'first_jid': jid, 'disp_name': name, 'part': part, 'state': state,
         'start': start, 'elapsed': elapsed, 'tb': tb, 'ids': [jid],
         'gpu_models': {gpu_model} if gpu_model else set(),
         'nodes': {nodelist} if nodelist and nodelist != 'None' else set(),
+        'gpu_count': gpu_count,
     }
 
 
 def _merge_into(g: dict, jid: str, start: str, elapsed: str,
-                gpu_model: str, nodelist: str) -> None:
+                gpu_model: str, nodelist: str, gpu_count: int = 0) -> None:
     g['ids'].append(jid)
+    g['gpu_count'] = g.get('gpu_count', 0) + gpu_count
     if elapsed > g['elapsed']:
         g['elapsed'] = elapsed
     if start < g['start']:
@@ -294,12 +297,13 @@ def _aggregate(rows: List[Tuple]) -> Tuple[List[dict], Dict[str, List[str]]]:
         jid, name, part, start, elapsed, state, _, alloc_tres, nodelist = row
         tb = _time_bucket(start)
         gpu_model = _parse_gpu(alloc_tres)
+        gpu_count = _parse_gpu_count(alloc_tres)
         matched = _find_matching_group(grouped, part, state, tb, name)
         if matched is None:
             grouped.append(_new_group(jid, name, part, start, elapsed,
-                                      state, tb, gpu_model, nodelist))
+                                      state, tb, gpu_model, nodelist, gpu_count))
         else:
-            _merge_into(matched, jid, start, elapsed, gpu_model, nodelist)
+            _merge_into(matched, jid, start, elapsed, gpu_model, nodelist, gpu_count)
 
     first_to_all: Dict[str, List[str]] = {
         g['first_jid']: g['ids'] for g in grouped
@@ -345,18 +349,19 @@ class FullHistoryModal(SpeekModal):
     def on_mount(self) -> None:
         dt = self.query_one('#fh-dt', SpeekDataTable)
         dt.zebra_stripes = True
+        dt.add_column('Name',    width=22)
         dt.add_column('E',       width=3)
         dt.add_column('Ago',     width=3)
-        dt.add_column('#',       width=2)
-        dt.add_column('Name',    width=12)
-        dt.add_column('GPU',     width=6)
-        dt.add_column('Nodes',   width=5)
-        dt.add_column('State',   width=7)
+        dt.add_column('#J',       width=2)
+        dt.add_column('#G',      width=3)
+        dt.add_column('Part',     width=6)
+        dt.add_column('Nodes',   width=8)
         dt.add_column('Elapsed', width=7)
-        dt.add_column('IDs',     width=8)
+        dt.add_column('IDs',     width=14)
         tv = self.app.theme_variables
         c_muted     = tc(tv, 'text-muted',     'bright_black')
         c_secondary = tc(tv, 'text-secondary', 'default')
+
         state_style = self._state_style_fn(tv)
         current_zone = -1
         div_counter = 0
@@ -367,14 +372,17 @@ class FullHistoryModal(SpeekModal):
                     dt.add_row(*[Text('') for _ in range(_N_HISTORY_COLS)], key=f'{_DIV_KEY_PREFIX}{div_counter}_sp')
                 current_zone = zone
                 _age, _date = _time_zone_parts(zone)
-                dt.add_row(*_divider_row(_age, _date, _N_HISTORY_COLS), key=f'{_DIV_KEY_PREFIX}{div_counter}')
+                cells = [Text(' ') for _ in range(_N_HISTORY_COLS)]
+                _label = f'| {_age} {_date}'
+                cells[0] = Text(_label.ljust(22), style='bold black on white')
+                dt.add_row(*cells, key=f'{_DIV_KEY_PREFIX}{div_counter}')
                 div_counter += 1
             time_mode = getattr(self.app, '_time_format', 'relative')
             row = self._build_row(g, state_style, c_muted, c_secondary, tv, time_mode=time_mode)
             dt.add_row(*row, key=g['first_jid'])
 
 
-class HistoryWidget(Widget):
+class HistoryWidget(FoldableTableMixin, Widget):
     """sacct job history grouped by name + temporal affinity."""
 
     can_focus = True
@@ -387,7 +395,7 @@ class HistoryWidget(Widget):
         Binding('1',     'tab_unread',  '',         show=False),
         Binding('2',     'tab_read',    '',         show=False),
         Binding('3',     'tab_all',     '',         show=False),
-        Binding('v',     'expand_group', '',        show=False),
+        Binding('v',     'expand_group', '▶▼',      show=True),
         Binding('V',     'fold_all',    '',         show=False),
         Binding('S',     'toggle_all_read', 'Read all', show=True),
         Binding('space', 'toggle_read', '☐/☑',     show=False),
@@ -409,10 +417,14 @@ class HistoryWidget(Widget):
         self._all_groups: List[dict]           = []
         self._first_to_all: Dict[str, List[str]] = {}
         self._jid_to_row: Dict[str, Tuple]     = {}
-        self._expanded_groups: set[str]        = set()
         self._oom_jobs: set[str]              = set()  # jids with OOM in logs
         self._oom_notified: set[str]          = set()
-        # fresh_jids: job_id → monotonic timestamp when it became fresh
+        # Load cached OOM verdicts immediately for instant badges on startup
+        self._load_oom_disk()
+        for jid, is_oom in self._oom_scan_cache.items():
+            if is_oom:
+                self._oom_jobs.add(jid)
+        # fresh_jids: job_id -> monotonic timestamp when it became fresh
         self._fresh_jids: Dict[str, float]     = {}
         self._startup_wall: float              = 0.0  # wall-clock at startup
 
@@ -428,7 +440,7 @@ class HistoryWidget(Widget):
         self._fresh_jids.pop(jid, None)
 
     def _fresh_intensity(self, jid: str) -> float:
-        """Return 0.0–1.0 highlight intensity for a fresh job. 0 = expired."""
+        """Return 0.0-1.0 highlight intensity for a fresh job. 0 = expired."""
         if jid not in self._fresh_jids:
             return 0.0
         import time
@@ -520,6 +532,9 @@ class HistoryWidget(Widget):
         import time as _time
         self.border_title = 'Events'
         self._startup_wall = _time.time()
+        # All tabs share one ctx for expanded state
+        self._ctx = self._init_ctx(renderer=self._render_cell, n_cols=_N_HISTORY_COLS, name_col_width=22)
+        self._trees: Dict[str, List[TreeNode]] = {'unread': [], 'read': [], 'all': []}
         for dt_id in _DT_IDS.values():
             self._setup_dt(self.query_one(f'#{dt_id}', SpeekDataTable))
         # Sync with app-level setting (set in Config tab)
@@ -545,15 +560,15 @@ class HistoryWidget(Widget):
 
     def _setup_dt(self, dt: SpeekDataTable) -> None:
         dt.zebra_stripes = True
+        dt.add_column('Name',    width=22)
         dt.add_column('E',       width=3)
         dt.add_column('Ago',     width=3)
-        dt.add_column('#',       width=2)
-        dt.add_column('Name',    width=12)
-        dt.add_column('GPU',     width=6)
-        dt.add_column('Nodes',   width=5)
-        dt.add_column('State',   width=7)
+        dt.add_column('#J',       width=2)
+        dt.add_column('#G',      width=3)
+        dt.add_column('Part',     width=6)
+        dt.add_column('Nodes',   width=8)
         dt.add_column('Elapsed', width=7)
-        dt.add_column('IDs',     width=8)
+        dt.add_column('IDs',     width=14)
 
     def watch_lookback_days(self, _old: int, _new: int) -> None:
         self._update_scope_label()
@@ -604,7 +619,7 @@ class HistoryWidget(Widget):
             self._all_rows = list(reversed(rows))
             self._jid_to_row = {row[0]: row for row in rows}
             self._all_groups, self._first_to_all = _aggregate(self._all_rows)
-            self._expanded_groups &= set(self._first_to_all.keys())
+            self._ctx.expanded &= set(self._first_to_all.keys())
             self.query_one(LoadingIndicator).display = False
             self._refresh_all_tables()
             # Scan for OOM in completed/running jobs
@@ -626,28 +641,78 @@ class HistoryWidget(Widget):
                 self.post_message(self.OomCount(len(self._oom_jobs)))
                 self._refresh_all_tables()
 
+    _oom_scan_cache: Dict[str, bool] = {}  # in-memory session cache
+    _OOM_CACHE_FILE = Path(
+        os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache')
+    ) / 'speek' / 'oom_verdicts.json'
+    _oom_disk_loaded = False
+
+    @classmethod
+    def _load_oom_disk(cls) -> None:
+        """Load persistent OOM verdicts from disk (once per session)."""
+        if cls._oom_disk_loaded:
+            return
+        cls._oom_disk_loaded = True
+        try:
+            import json
+            data = json.loads(cls._OOM_CACHE_FILE.read_text())
+            if isinstance(data, dict):
+                cls._oom_scan_cache.update(data)
+        except Exception:
+            pass
+
+    @classmethod
+    def _save_oom_disk(cls) -> None:
+        """Persist OOM verdicts for completed jobs to disk."""
+        try:
+            import json
+            cls._OOM_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            # Only save completed jobs (running jobs may change)
+            cls._OOM_CACHE_FILE.write_text(json.dumps(cls._oom_scan_cache))
+        except Exception:
+            pass
+
     def _scan_oom(self) -> None:
-        """Kick off a background worker to scan recent job logs for OOM."""
-        # Collect jids of COMPLETED/RUNNING groups not yet scanned
+        """Scan job logs for OOM. Results cached to disk for instant startup.
+
+        COMPLETED jobs: cached permanently on disk — never re-scanned.
+        RUNNING jobs: re-scanned each cycle (logs grow).
+        """
+        # Load disk cache on first call
+        self._load_oom_disk()
+
+        # Apply cached verdicts immediately
+        for jid, is_oom in self._oom_scan_cache.items():
+            if is_oom and jid not in self._oom_jobs:
+                self._oom_jobs.add(jid)
+
         candidates = []
         for g in self._all_groups:
-            if g['state'] in ('COMPLETED', 'RUNNING'):
-                for jid in g['ids']:
-                    if jid not in self._oom_jobs and jid not in self._oom_notified:
-                        candidates.append(jid)
+            state = g['state'].split()[0] if g['state'] else ''
+            if state not in ('COMPLETED', 'RUNNING'):
+                continue
+            for jid in g['ids']:
+                if jid in self._oom_jobs:
+                    continue
+                if state == 'COMPLETED' and jid in self._oom_scan_cache:
+                    continue
+                candidates.append((jid, state))
+
         if not candidates:
             return
-        # Limit to most recent 30 to keep it fast
-        candidates = candidates[:30]
 
         def _worker():
             from speek.speek_max.slurm import get_job_log_path
             from speek.speek_max.log_scan import detect_oom
             oom_found: set[str] = set()
-            for jid in candidates:
+            for jid, _state in candidates:
                 path = get_job_log_path(jid)
-                if path and detect_oom(path):
+                is_oom = bool(path and detect_oom(path))
+                self._oom_scan_cache[jid] = is_oom
+                if is_oom:
                     oom_found.add(jid)
+            # Persist to disk after scan
+            self._save_oom_disk()
             return oom_found
 
         self.run_worker(_worker, thread=True, group='oom-scan')
@@ -657,11 +722,18 @@ class HistoryWidget(Widget):
         dt_id = _DT_IDS.get(tc_widget.active.removeprefix('tc-'), 'dt-unread')
         return self.query_one(f'#{dt_id}', SpeekDataTable)
 
+    def _active_tab(self) -> str:
+        tc_widget = self.query_one(_HISTORY_TC, TabbedContent)
+        return tc_widget.active.removeprefix('tc-')
+
     def _group_is_unread(self, g: dict) -> bool:
         return any(jid not in self._read_ids for jid in g['ids'])
 
+    _EVENT_EXCLUDE = {'PENDING', 'RUNNING'}
+
     def _filtered_groups(self, tab: str) -> List[dict]:
-        recent = [g for g in self._all_groups if _is_recent(g)]
+        recent = [g for g in self._all_groups
+                  if _is_recent(g) and g.get('state') not in self._EVENT_EXCLUDE]
         if tab == 'unread':
             return [g for g in recent if self._group_is_unread(g)]
         if tab == 'read':
@@ -674,14 +746,94 @@ class HistoryWidget(Widget):
         c_success = tc(tv, 'text-success', 'green')
         c_warning = tc(tv, 'text-warning', 'yellow')
         return {
-            'COMPLETED':     f'dim {c_muted}',
+            'COMPLETED':     'bold #4A9FD9',
             'FAILED':        f'bold {c_error}',
             'TIMEOUT':       f'bold {c_error}',
-            'CANCELLED':     f'dim {c_error}',
+            'CANCELLED':     f'bold {c_muted}',
             'OUT_OF_MEMORY': f'bold {c_error}',
             'RUNNING':       f'bold {c_success}',
-            'PENDING':       c_warning,
+            'PENDING':       f'bold {c_warning}',
         }
+
+    # ── Tree building ────────────────────────────────────────────────────────
+
+    def _build_tree(self, groups: List[dict]) -> List[TreeNode]:
+        """Build tree: Divider (time zones) -> event groups (FoldGroup if count > 1, else Leaf)
+        -> individual events (Leaf)."""
+        tree: List[TreeNode] = []
+        current_zone = -1
+        div_counter = 0
+        for g in groups:
+            zone = _time_zone_idx(g['start'])
+            if zone != current_zone:
+                if current_zone >= 0:
+                    tree.append(Spacer(key=f'{_DIV_KEY_PREFIX}{div_counter}_sp'))
+                current_zone = zone
+                _age, _date = _time_zone_parts(zone)
+                tree.append(Divider(
+                    key=f'{_DIV_KEY_PREFIX}{div_counter}',
+                    label=f'{_age} {_date}',
+                ))
+                div_counter += 1
+
+            n = len(g['ids'])
+            if n > 1:
+                # Expandable group
+                ind_children = [
+                    Leaf(
+                        key=f'{_IND_KEY_PREFIX}{jid}',
+                        data={'jid': jid, 'group': g},
+                        indent=5,
+                    )
+                    for jid in g['ids']
+                ]
+                tree.append(FoldGroup(
+                    key=g['first_jid'],
+                    fold_key=g['first_jid'],
+                    data={'group': g},
+                    children=ind_children,
+                    mode=FoldMode.EXPANDED_SET,
+                    indent=3,
+                ))
+            else:
+                tree.append(Leaf(
+                    key=g['first_jid'],
+                    data={'group': g},
+                    indent=3,
+                ))
+        return tree
+
+    def _render_cell(self, node: TreeNode, is_collapsed: bool, n_cols: int) -> List[Text]:
+        """Render a single tree node for the Events tables."""
+        tv = self.app.theme_variables
+        c_muted     = tc(tv, 'text-muted',     'bright_black')
+        c_secondary = tc(tv, 'text-secondary', 'default')
+        state_style = self._state_style_dict(tv)
+        time_mode = getattr(self.app, '_time_format', 'relative')
+
+        if isinstance(node, FoldGroup):
+            g = node.data['group']
+            return list(self._build_row(g, state_style, c_muted, c_secondary, tv,
+                                        expanded=not is_collapsed, time_mode=time_mode))
+
+        if isinstance(node, Leaf):
+            d = node.data
+            if 'group' in d and 'jid' not in d:
+                # Top-level single group leaf
+                g = d['group']
+                return list(self._build_row(g, state_style, c_muted, c_secondary, tv,
+                                            time_mode=time_mode))
+            elif 'jid' in d:
+                # Individual job under expanded group
+                jid = d['jid']
+                row_data = self._jid_to_row.get(jid)
+                if row_data:
+                    return list(self._build_individual_row(
+                        row_data, state_style, c_muted, c_secondary, tv, time_mode,
+                        is_last=node.is_last))
+                return [Text('') for _ in range(n_cols)]
+
+        return [Text('') for _ in range(n_cols)]
 
     @safe('Events refresh')
     def _refresh_all_tables(self) -> None:
@@ -689,7 +841,8 @@ class HistoryWidget(Widget):
             dt    = self.query_one(f'#{dt_id}', SpeekDataTable)
             stats = self.query_one(f'#stats-{tab}', Static)
             groups = self._filtered_groups(tab)
-            self._populate_dt(dt, groups)
+            self._trees[tab] = self._build_tree(groups)
+            self._rebuild(dt, self._ctx, self._trees[tab])
             stats.update(self._stats_text(groups, tab))
             empty = len(groups) == 0
             dt.display = not empty
@@ -697,7 +850,8 @@ class HistoryWidget(Widget):
         self._update_title()
 
     def _update_title(self) -> None:
-        recent        = [g for g in self._all_groups if _is_recent(g)]
+        recent        = [g for g in self._all_groups
+                         if _is_recent(g) and g.get('state') not in self._EVENT_EXCLUDE]
         unread_groups = [g for g in recent if self._group_is_unread(g)]
         unread        = len(unread_groups)
         read_count    = len(recent) - unread
@@ -708,65 +862,10 @@ class HistoryWidget(Widget):
         completed = sum(1 for g in unread_groups if g['state'] == 'COMPLETED')
         self.post_message(self.StatusCounts(failed, timeout, completed))
 
-        if unread or read_count:
-            self.border_title = f'Events  [dim]{unread}U · {read_count}R[/dim]'
+        if unread:
+            self.border_title = f'Events  [bold]{unread}[/bold] [dim]unread[/dim]'
         else:
             self.border_title = 'Events'
-
-    def _add_expanded_rows(self, dt: SpeekDataTable, g: dict,
-                           state_style: dict, c_muted: str, c_secondary: str,
-                           tv: dict) -> None:
-        """Add individual job rows beneath an expanded group."""
-        time_mode = getattr(self.app, '_time_format', 'relative')
-        for jid in g['ids']:
-            row_data = self._jid_to_row.get(jid)
-            if row_data:
-                ind = self._build_individual_row(
-                    row_data, state_style, c_muted, c_secondary, tv, time_mode)
-                dt.add_row(*ind, key=f'{_IND_KEY_PREFIX}{jid}')
-
-    @safe('Events populate')
-    def _populate_dt(self, dt: SpeekDataTable, groups: List[dict]) -> None:
-        tv          = self.app.theme_variables
-        c_muted     = tc(tv, 'text-muted',     'bright_black')
-        c_secondary = tc(tv, 'text-secondary', 'default')
-        state_style = self._state_style_dict(tv)
-
-        cursor_key = None
-        try:
-            if dt.row_count > 0:
-                cursor_key = dt.coordinate_to_cell_key(dt.cursor_coordinate)[0].value
-        except Exception:
-            pass
-
-        time_mode = getattr(self.app, '_time_format', 'relative')
-
-        with self.app.batch_update():
-            dt.clear()
-            current_zone = -1
-            div_counter = 0
-            for g in groups:
-                zone = _time_zone_idx(g['start'])
-                if zone != current_zone:
-                    if current_zone >= 0:
-                        dt.add_row(*[Text('') for _ in range(_N_HISTORY_COLS)], key=f'{_DIV_KEY_PREFIX}{div_counter}_sp')
-                    current_zone = zone
-                    _age, _date = _time_zone_parts(zone)
-                    dt.add_row(*_divider_row(_age, _date, _N_HISTORY_COLS),
-                               key=f'{_DIV_KEY_PREFIX}{div_counter}')
-                    div_counter += 1
-                expanded = g['first_jid'] in self._expanded_groups
-                row = self._build_row(g, state_style, c_muted, c_secondary, tv,
-                                      expanded=expanded, time_mode=time_mode)
-                dt.add_row(*row, key=g['first_jid'])
-                if expanded:
-                    self._add_expanded_rows(dt, g, state_style, c_muted, c_secondary, tv)
-
-        if cursor_key and not str(cursor_key).startswith(_DIV_KEY_PREFIX):
-            try:
-                dt.move_cursor(row=dt.get_row_index(cursor_key))
-            except Exception:
-                pass
 
     def _build_row(
         self, g: dict, state_style: dict,
@@ -778,7 +877,7 @@ class HistoryWidget(Widget):
         _time_mode = time_mode
 
         def _cell(content: str, w: int, style: str = '') -> Text:
-            return Text(content[:w], style=style)
+            return Text(content, style=style)
 
         _TERMINAL = {'COMPLETED', 'FAILED', 'TIMEOUT', 'OUT_OF_MEMORY', 'CANCELLED'}
         name_style    = 'bold' if unread else c_muted
@@ -790,30 +889,27 @@ class HistoryWidget(Widget):
         else:
             fold = ''
         count_str     = str(n)
-        disp_name     = f'{fold} {g["disp_name"]}' if fold else g['disp_name']
+        disp_name     = f'   {fold} {g["disp_name"]}' if fold else f'     {g["disp_name"]}'
         elapsed_style = (f'bold {state_style.get(g["state"], c_muted)}'
                          if g['state'] in _TERMINAL else c_muted)
         gpu_label = _fmt_gpu(g['gpu_models']) or g['part']
 
         has_oom = any(jid in self._oom_jobs for jid in g['ids'])
         if has_oom:
-            c_error = tc(tv, 'text-error', 'red')
-            bg = tc(tv, 'error', 'red')
-            fg = tc(tv, 'background', 'black')
-            badge = Text(' ☠ ', style=f'bold {fg} on {bg}')
-            state_cell = _cell('OOM', _COL_WIDTHS['state'], f'bold {c_error}')
+            badge = state_badge('OUT_OF_MEMORY')
         else:
             badge = _type_badge(g['state'], tv)
-            state_cell = _cell(g['state'], _COL_WIDTHS['state'], state_style.get(g['state'], 'default'))
 
+        gpu_total = g.get('gpu_count', 0)
+        gpu_count_str = str(gpu_total) if gpu_total else ''
         return (
+            _cell(disp_name,              _COL_WIDTHS['name'],    name_style),
             badge,
             _cell(_rel_time(g['start'], _time_mode),  _COL_WIDTHS['ago'],     c_secondary),
             _cell(count_str,              _COL_WIDTHS['count'],   f'bold {c_muted}'),
-            _cell(disp_name,              _COL_WIDTHS['name'],    name_style),
+            Text(gpu_count_str, style=f'bold {c_muted}'),
             _cell(gpu_label,              _COL_WIDTHS['gpu'],     c_secondary),
             _cell(_fmt_nodes(g['nodes']), _COL_WIDTHS['nodes'],   c_secondary),
-            state_cell,
             _cell(g['elapsed'],           _COL_WIDTHS['elapsed'], elapsed_style),
             _cell(_fmt_ids(g['ids']),     _COL_WIDTHS['ids'],     c_muted),
         )
@@ -821,7 +917,7 @@ class HistoryWidget(Widget):
     def _build_individual_row(
         self, row_data: Tuple, state_style: dict,
         c_muted: str, c_secondary: str, tv: dict,
-        time_mode: str = 'relative',
+        time_mode: str = 'relative', is_last: bool = False,
     ) -> tuple:
         """Build a DataTable row for an individual job within an expanded group."""
         jid, name, part, start, elapsed, state = (list(row_data) + [''] * 6)[:6]
@@ -829,16 +925,18 @@ class HistoryWidget(Widget):
         nodelist   = row_data[8] if len(row_data) > 8 else ''
         gpu_label  = _parse_gpu(alloc_tres) or part
         state_base = state.split()[0] if state else ''
+        branch = '└' if is_last else '├'
+        ind_gpu = _parse_gpu_count(alloc_tres)
         return (
+            Text(f'   {branch}── {name}', style=c_muted),
             _type_badge(state_base, tv),
-            Text(_rel_time(start, time_mode)[:8], style=c_secondary),
-            Text('  ↳',                     style=c_muted),
-            Text(f'  {name}'[:18],          style=c_muted),
-            Text(gpu_label[:12],            style=c_secondary),
-            Text(nodelist[:10],             style=c_secondary),
-            Text(state_base[:12],           style=state_style.get(state_base, c_muted)),
-            Text(elapsed[:9],               style=c_muted),
-            Text(jid[:18],                  style=c_muted),
+            Text(_rel_time(start, time_mode), style=c_secondary),
+            Text('',                        style=c_muted),
+            Text(str(ind_gpu) if ind_gpu else '', style=c_muted),
+            Text(gpu_label,                 style=c_secondary),
+            Text(nodelist,                  style=c_secondary),
+            Text(elapsed,                   style=c_muted),
+            Text(jid,                       style=c_muted),
         )
 
     def _stats_text(self, groups: List[dict], tab: str) -> Text:
@@ -865,7 +963,7 @@ class HistoryWidget(Widget):
             ('OUT_OF_MEMORY', c_error,   'oom'),
             ('CANCELLED',     c_warning, 'cancelled'),
             ('RUNNING',       c_success, 'running'),
-            ('COMPLETED',     c_muted,   'completed'),
+            ('COMPLETED',     '#4A9FD9',   'completed'),
             ('PENDING',       c_warning, 'pending'),
         ]
         parts = []
@@ -888,34 +986,24 @@ class HistoryWidget(Widget):
         n_oom = len(self._oom_jobs)
         if n_oom:
             t.append('  ')
-            t.append(f'☠ {n_oom} OOM', style=f'bold {c_error}')
+            t.append(f'☢ {n_oom} OOM', style=f'bold {c_error}')
         return t
 
     def _selected_first_jid(self) -> Optional[str]:
         dt = self._active_dt()
-        if dt.row_count == 0:
+        key = self._selected_key(dt, self._ctx)
+        if not key:
             return None
-        try:
-            row_key, _ = dt.coordinate_to_cell_key(dt.cursor_coordinate)
-            key = str(row_key.value)
-            if key.startswith(_DIV_KEY_PREFIX):
-                return None
-            if key.startswith(_IND_KEY_PREFIX):
-                return key[len(_IND_KEY_PREFIX):]
-            return key
-        except Exception:
+        if key.startswith(_DIV_KEY_PREFIX):
             return None
+        if key.startswith(_IND_KEY_PREFIX):
+            return key[len(_IND_KEY_PREFIX):]
+        return key
 
     def _selected_raw_key(self) -> Optional[str]:
         """Return the raw row key without stripping any prefix."""
         dt = self._active_dt()
-        if dt.row_count == 0:
-            return None
-        try:
-            row_key, _ = dt.coordinate_to_cell_key(dt.cursor_coordinate)
-            return str(row_key.value)
-        except Exception:
-            return None
+        return self._selected_key(dt, self._ctx)
 
     def _set_read(self, first_jid: str, read: bool) -> None:
         for jid in self._first_to_all.get(first_jid, [first_jid]):
@@ -965,15 +1053,12 @@ class HistoryWidget(Widget):
         )
 
     def action_fold_all(self) -> None:
-        """Fold or unfold ALL groups. If any open, fold all. If all folded, unfold all."""
-        expandable = {g['first_jid'] for g in self._all_groups
-                      if len(self._first_to_all.get(g['first_jid'], [])) > 1}
-        if expandable - self._expanded_groups:
-            # Some are collapsed → expand all
-            self._expanded_groups |= expandable
-        else:
-            # All expanded → collapse all
-            self._expanded_groups.clear()
+        """Fold or unfold ALL groups."""
+        tab = self._active_tab()
+        dt = self._active_dt()
+        tree = self._trees.get(tab, [])
+        self._fold_all_and_rebuild(dt, self._ctx, tree, FoldMode.EXPANDED_SET)
+        # Re-render other tabs too since they share expanded state
         self._refresh_all_tables()
 
     def action_toggle_all_read(self) -> None:
@@ -997,15 +1082,12 @@ class HistoryWidget(Widget):
             return
         if len(self._first_to_all.get(key, [key])) <= 1:
             return
-        if key in self._expanded_groups:
-            self._expanded_groups.discard(key)
-        else:
-            self._expanded_groups.add(key)
+        tab = self._active_tab()
+        dt = self._active_dt()
+        tree = self._trees.get(tab, [])
+        self._toggle_and_rebuild(dt, self._ctx, tree, key)
+        # Re-render other tabs since they share expanded state
         self._refresh_all_tables()
-        try:
-            self._active_dt().move_cursor(row=self._active_dt().get_row_index(key))
-        except Exception:
-            pass
 
     def action_view_log(self) -> None:
         fid = self._selected_first_jid()
@@ -1050,7 +1132,7 @@ class HistoryWidget(Widget):
         state = group.get('state', '')
         if state not in ('FAILED', 'TIMEOUT', 'OUT_OF_MEMORY', 'CANCELLED'):
             self.app.notify(
-                f'Job {fid} is {state} — only failed/timeout/cancelled jobs can be relaunched',
+                f'Job {fid} is {state} -- only failed/timeout/cancelled jobs can be relaunched',
                 severity='warning',
             )
             return
