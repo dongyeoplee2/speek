@@ -376,7 +376,7 @@ def _gpu_count(gres: str) -> str:
 
 
 def fetch_queue() -> List[Tuple]:
-    """Returns list of row tuples: (jobid, user, name, partition, gpus, state, elapsed).
+    """Returns list of row tuples: (jobid, user, name, partition, gpus, state, elapsed, start).
     Results are cached for _SQUEUE_TTL seconds."""
     global _queue_cache
     now = _time.monotonic()
@@ -385,7 +385,7 @@ def fetch_queue() -> List[Tuple]:
             return _queue_cache[1]
     try:
         out = subprocess.check_output(
-            ['squeue', '-o', '%i|%u|%j|%P|%b|%T|%M', '-h',
+            ['squeue', '-o', '%i|%u|%j|%P|%b|%T|%M|%S', '-h',
              '--states=RUNNING,PENDING'],
             text=True, stderr=subprocess.DEVNULL,
         )
@@ -395,8 +395,8 @@ def fetch_queue() -> List[Tuple]:
     for ln in out.splitlines():
         if not ln.strip():
             continue
-        parts = (ln.split('|') + [''] * 7)[:7]
-        jid, user, name, part, gres, state, elapsed = parts
+        parts = (ln.split('|') + [''] * 8)[:8]
+        jid, user, name, part, gres, state, elapsed, start = parts
         rows.append((
             jid.strip(),
             user.strip(),
@@ -405,6 +405,7 @@ def fetch_queue() -> List[Tuple]:
             _gpu_count(gres.strip()),
             state.strip(),
             elapsed.strip(),
+            start.strip(),
         ))
     rows.sort(key=lambda r: (0 if r[5] == 'RUNNING' else 1, r[1]))
     with _queue_lock:
@@ -432,7 +433,7 @@ def _fmt_eta(s: str) -> str:
 
 
 def fetch_my_jobs(user: str) -> List[Tuple]:
-    """Returns [(jid, name, partition, gpus, state, elapsed, eta), ...].
+    """Returns [(jid, name, partition, gpus, state, elapsed, eta, start), ...].
     Results are cached per-user for _SQUEUE_TTL seconds."""
     now = _time.monotonic()
     with _my_jobs_lock:
@@ -451,8 +452,8 @@ def fetch_my_jobs(user: str) -> List[Tuple]:
         if not ln.strip():
             continue
         parts = (ln.split('|') + [''] * 7)[:7]
-        jid, name, part, gres, state, elapsed, eta_raw = parts
-        eta = _fmt_eta(eta_raw) if state.strip().upper() == 'PENDING' else ''
+        jid, name, part, gres, state, elapsed, start_raw = parts
+        eta = _fmt_eta(start_raw) if state.strip().upper() == 'PENDING' else ''
         rows.append((
             jid.strip(),
             name.strip(),
@@ -461,6 +462,7 @@ def fetch_my_jobs(user: str) -> List[Tuple]:
             state.strip(),
             elapsed.strip(),
             eta,
+            start_raw.strip(),
         ))
     rows.sort(key=lambda r: (0 if r[4] == 'RUNNING' else 1))
     with _my_jobs_lock:
@@ -1066,9 +1068,14 @@ def fetch_user_stats(days: int = 30) -> List[Dict]:
         except Exception:
             continue
 
+    _part_default = lambda: {
+        'total': 0, 'completed': 0, 'failed': 0, 'cancelled': 0,
+        'gpu_secs': 0.0, 'elapsed_secs': 0,
+    }
     hist: Dict[str, Dict] = defaultdict(lambda: {
         'total': 0, 'completed': 0, 'failed': 0, 'cancelled': 0,
         'gpu_secs': 0.0, 'elapsed_secs': 0, 'partitions': defaultdict(int),
+        'part_stats': defaultdict(_part_default),
     })
 
     for ln in out.splitlines():
@@ -1097,8 +1104,19 @@ def fetch_user_stats(days: int = 30) -> List[Dict]:
             h['cancelled'] += 1
         h['gpu_secs'] += gpus * secs
         h['elapsed_secs'] += secs
-        if partition.strip():
-            h['partitions'][partition.strip()] += 1
+        pname = partition.strip()
+        if pname:
+            h['partitions'][pname] += 1
+            ps = h['part_stats'][pname]
+            ps['total'] += 1
+            if state == 'COMPLETED':
+                ps['completed'] += 1
+            elif 'FAIL' in state or 'MEMORY' in state or 'TIMEOUT' in state:
+                ps['failed'] += 1
+            elif 'CANCEL' in state:
+                ps['cancelled'] += 1
+            ps['gpu_secs'] += gpus * secs
+            ps['elapsed_secs'] += secs
 
     # ── current squeue state ──────────────────────────────────────────
     running_gpus: Dict[str, int] = defaultdict(int)
@@ -1136,6 +1154,22 @@ def fetch_user_stats(days: int = 30) -> List[Dict]:
         avg_secs = (h.get('elapsed_secs', 0) // total) if total else 0
         parts_d = h.get('partitions', {})
         top_part = max(parts_d, key=parts_d.get) if parts_d else ''
+        # Build per-partition breakdown list sorted by gpu_hours desc
+        pstats_raw = h.get('part_stats', {})
+        part_breakdown = []
+        for pname, ps in pstats_raw.items():
+            pt = ps['total']
+            part_breakdown.append({
+                'partition':  pname,
+                'total_jobs': pt,
+                'completed':  ps['completed'],
+                'failed':     ps['failed'],
+                'cancelled':  ps['cancelled'],
+                'gpu_hours':  ps['gpu_secs'] / 3600.0,
+                'avg_secs':   (ps['elapsed_secs'] // pt) if pt else 0,
+            })
+        part_breakdown.sort(key=lambda p: -p['gpu_hours'])
+
         result.append({
             'user':         user,
             'running_gpus': running_gpus.get(user, 0),
@@ -1147,6 +1181,7 @@ def fetch_user_stats(days: int = 30) -> List[Dict]:
             'gpu_hours':    gpu_hours,
             'avg_secs':     avg_secs,
             'top_partition': top_part,
+            'part_breakdown': part_breakdown,
         })
 
     result.sort(key=lambda r: (-r['running_gpus'], -r['gpu_hours']))
@@ -1530,6 +1565,38 @@ def _compute_timeseries(
             continue
         jobs.append((js, je or min(now, end_dt), gpus))
     return _bucket_jobs(jobs, start_dt, end_dt, n_buckets)
+
+
+def _compute_per_group_timeseries(
+    all_rows: List[_StatsRow],
+    start_dt: datetime,
+    end_dt: datetime,
+    dimension: str,
+    n_buckets: int,
+) -> Dict[str, Dict]:
+    """Compute one timeseries per group (partition/node/user/model).
+
+    Returns {group_name: {buckets: [...], labels: [...], peak: float, ...}}.
+    """
+    now = datetime.now()
+    grouped: Dict[str, List[Tuple[datetime, datetime, int]]] = defaultdict(list)
+    for _, user, partition, nodelist, js, je, gpus, _, alloc_gres in all_rows:
+        if dimension == 'partition':
+            grp = partition or 'unknown'
+        elif dimension == 'node':
+            grp = nodelist.split(',')[0] or 'unknown'
+        elif dimension == 'user':
+            grp = user or 'unknown'
+        else:
+            mm = GPU_RE_NAMED.search(alloc_gres)
+            grp = _norm(mm.group(1)) if mm else ('GPU' if gpus else None)
+        if not grp:
+            continue
+        grouped[grp].append((js, je or min(now, end_dt), gpus))
+    result = {}
+    for grp, jobs in grouped.items():
+        result[grp] = _bucket_jobs(jobs, start_dt, end_dt, n_buckets)
+    return result
 
 
 def _compute_breakdown(all_rows: List[_StatsRow], dimension: str) -> List[Dict]:

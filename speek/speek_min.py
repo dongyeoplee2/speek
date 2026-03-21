@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import re
 import subprocess
 import sys
+import time
 from collections import defaultdict
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from rich.align import Align
@@ -46,6 +50,88 @@ def _util_color(pct: float) -> str:
     if pct >= 1.0:  return 'red'
     if pct >= 0.50: return 'yellow'
     return 'green'
+
+
+# ── Trend tracking ──────────────────────────────────────────────────────────
+# Keeps a rolling history of {model: used_gpus} snapshots (~30 min window).
+# Always compares current state to ~5 min ago — gives a stable, meaningful
+# trend regardless of how often you run speek-.
+#
+# Use case: "Should I hurry to submit?" → ↓3 on A100 means 3 GPUs were
+# taken in the last 5 min — competition is high, submit now.
+# ↑2 means 2 freed up — no rush.
+
+_TREND_FILE = Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache')) / 'speek' / 'usage_trend.json'
+_TREND_WINDOW = 300     # compare to ~5 minutes ago
+_TREND_MAX_HISTORY = 60  # keep max 60 snapshots (~30 min at 30s intervals)
+
+
+def _load_history() -> List[Dict]:
+    """Load snapshot history. Returns [{ts: float, used: {model: int}}, ...]."""
+    try:
+        data = json.loads(_TREND_FILE.read_text())
+        if isinstance(data, list):
+            return data
+        return []  # old format — discard
+    except Exception:
+        return []
+
+
+def _save_history(history: List[Dict]) -> None:
+    try:
+        _TREND_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _TREND_FILE.write_text(json.dumps(history))
+    except Exception:
+        pass
+
+
+def _compute_trends(stats: Dict[str, Dict]) -> Dict[str, Tuple[str, int]]:
+    """Compare current usage to ~5 min ago. Returns {model: (arrow, delta)}.
+
+    Keeps a rolling history of snapshots. Finds the snapshot closest to
+    5 minutes ago and compares. Shows stable trends even when checking
+    every few seconds.
+    """
+    now = time.time()
+    current_used = {m: d['Used'] for m, d in stats.items()}
+
+    # Load and append current snapshot
+    history = _load_history()
+    history.append({'ts': now, 'used': current_used})
+
+    # Prune: keep only last 30 min, max 60 entries
+    history = [h for h in history if now - h['ts'] < 1800]
+    if len(history) > _TREND_MAX_HISTORY:
+        history = history[-_TREND_MAX_HISTORY:]
+
+    _save_history(history)
+
+    # Find snapshot closest to 5 min ago
+    target = now - _TREND_WINDOW
+    best = None
+    best_dist = float('inf')
+    for h in history[:-1]:  # exclude current
+        dist = abs(h['ts'] - target)
+        if dist < best_dist:
+            best_dist = dist
+            best = h
+
+    # Need a snapshot within reasonable range (2-10 min ago)
+    if best is None or best_dist > _TREND_WINDOW * 2:
+        return {}
+
+    prev_used = best['used']
+    trends: Dict[str, Tuple[str, int]] = {}
+    for m, cur_u in current_used.items():
+        old_u = prev_used.get(m)
+        if old_u is None:
+            continue
+        delta = cur_u - old_u  # positive = more used = less free
+        if delta > 0:
+            trends[m] = ('↓', delta)   # less free — hurry
+        elif delta < 0:
+            trends[m] = ('↑', -delta)  # more free — no rush
+    return trends
 
 
 def _bar(used: int, total: int, width: int = 16) -> Text:
@@ -254,13 +340,18 @@ def _col(t: Text, width: int) -> Text:
     return t
 
 
-def _build_model_line(m: str, d: Dict, pending: Dict, show_nodes: bool = True) -> Text:
+def _build_model_line(m: str, d: Dict, pending: Dict, my_gpus: Dict,
+                      show_nodes: bool = True,
+                      trend: Tuple[str, int] = None,
+                      w_nodes: int = 14,
+                      has_any_trend: bool = False) -> Text:
     """Build one GPU model row."""
-    W_MODEL = 8   # model name
-    W_VRAM  = 5   # vram like "48G"
-    W_BAR   = 16
-    W_CNT   = 6
-    W_DEM   = 4
+    W_MODEL = 8
+    W_VRAM  = 4
+    W_BAR   = 14
+    W_CNT   = 5
+    W_DEM   = 3
+    W_MY    = 6
 
     T, U, F = d['Total'], d['Used'], d['Free']
     pct = U / T if T else 0.0
@@ -281,7 +372,16 @@ def _build_model_line(m: str, d: Dict, pending: Dict, show_nodes: bool = True) -
     if pd:
         pressure = pd / max(F, 1)
         dc = 'red' if pressure >= 2 else ('yellow' if pressure >= 1 else 'bright_black')
-        dem_t.append(f'↑{pd}', style=dc)
+        dem_t.append(f'⏸{pd}', style=dc)
+
+    # Trend: availability change since last check
+    trend_t = Text()
+    if trend:
+        arrow, delta = trend
+        if arrow == '↑':
+            trend_t.append(f'{arrow}{delta}', style='bold green')
+        else:
+            trend_t.append(f'{arrow}{delta}', style='bold red')
 
     emoji = _usage_emoji(pct * 100)
 
@@ -290,24 +390,57 @@ def _build_model_line(m: str, d: Dict, pending: Dict, show_nodes: bool = True) -
     line.append_text(_col(vram_t, W_VRAM))
     line.append_text(_col(Text(emoji), 4))
     line.append_text(_bar(U, T, W_BAR))
-    line.append(' ')
     line.append_text(_col(cnt_t, W_CNT))
     line.append_text(_col(dem_t, W_DEM))
+    if has_any_trend:
+        line.append_text(_col(trend_t, 3))
+
+    W_MYJOB = 6
 
     if show_nodes:
         nodes = d.get('Nodes', [])
-        line.append_text(_col(Text(f'{len(nodes)}×', style='bright_black'), 3))
-        line.append_text(_node_range(nodes))
+        node_t = Text()
+        if len(nodes) > 1:
+            node_t.append(f'{len(nodes)}×', style='bright_black')
+            node_t.append(' ')
+        node_t.append_text(_node_range(nodes))
+        line.append_text(_col(node_t, w_nodes))
+    else:
+        line.append_text(_col(Text(''), w_nodes))
+
+    # My GPU usage after nodes, separated by │ with green bg
+    mg = my_gpus.get(m, {})
+    my_r, my_pd = mg.get('R', 0), mg.get('PD', 0)
+    mybg = ''
+    my_t = Text()
+    my_t.append('│', style='bright_black')
+    my_t.append(' ', style=mybg)
+    inner = Text()
+    if my_r:
+        inner.append(f'▶{my_r}', style='bold green')
+    if my_pd:
+        if my_r:
+            inner.append(' ')
+        inner.append(f'⏸{my_pd}', style='bold yellow')
+    my_t.append_text(inner)
+    # pad remaining with bg
+    cur = _display_width(my_t.plain)
+    total_w = 2 + W_MYJOB  # │ + space + content
+    pad = max(0, total_w - cur)
+    if pad:
+        my_t.append(' ' * pad, style=mybg)
+    line.append_text(my_t)
 
     return line
 
 
 def _line_width(show_nodes: bool) -> int:
     """Approximate char width of one model line."""
-    return 47 if not show_nodes else 60
+    return 43 if not show_nodes else 57
 
 
-def build_panel(stats: Dict[str, Dict], term_w: int = 80, term_h: int = 24) -> Panel:
+def build_panel(stats: Dict[str, Dict], my_gpus: Dict,
+                term_w: int = 80, term_h: int = 24, user: str = '') -> Panel:
     """Build a Rich Panel, auto-arranging into multi-column when terminal is wide but short."""
     if not stats:
         return Panel(
@@ -317,6 +450,7 @@ def build_panel(stats: Dict[str, Dict], term_w: int = 80, term_h: int = 24) -> P
         )
 
     pending = _fetch_pending()
+    trends = _compute_trends(stats)
     models = sorted(stats, key=lambda m: stats[m]['Total'], reverse=True)
     n = len(models)
 
@@ -346,14 +480,21 @@ def build_panel(stats: Dict[str, Dict], term_w: int = 80, term_h: int = 24) -> P
         n_cols = max(1, n_cols)
         show_nodes = False
 
+    show_nodes = False
+    max_node_w = 0
+
     # Build model lines
+    has_any_trend = bool(trends)
     model_lines = []
     total_T = total_U = 0
     for m in models:
         d = stats[m]
         total_T += d['Total']
         total_U += d['Used']
-        model_lines.append(_build_model_line(m, d, pending, show_nodes))
+        model_lines.append(_build_model_line(m, d, pending, my_gpus, show_nodes,
+                                             trend=trends.get(m),
+                                             w_nodes=max_node_w,
+                                             has_any_trend=has_any_trend))
 
     # Arrange into columns
     rows_per_col = (n + n_cols - 1) // n_cols
@@ -390,27 +531,68 @@ def build_panel(stats: Dict[str, Dict], term_w: int = 80, term_h: int = 24) -> P
     tcnt.append(f'{total_T - total_U}', style=f'bold {uc} {bg}')
     tcnt.append(f'/{total_T}', style=f'bright_black {bg}')
     total_line.append_text(_col(tname, 8))    # W_MODEL
-    total_line.append_text(_col(Text('', style=bg), 5))  # W_VRAM
+    total_line.append_text(_col(Text('', style=bg), 4))  # W_VRAM
     total_line.append_text(_col(Text(_usage_emoji(total_pct * 100), style=bg), 4))
-    total_line.append_text(_bar(total_U, total_T, 16))
-    total_line.append(' ', style=bg)
-    total_line.append_text(_col(tcnt, 6))
-    # Pad to match the widest model line
+    total_line.append_text(_bar(total_U, total_T, 14))
+    total_line.append_text(_col(tcnt, 5))
+    total_my_r = sum(v.get('R', 0) for v in my_gpus.values())
+    total_my_pd = sum(v.get('PD', 0) for v in my_gpus.values())
+    # Measure full row width from model lines (which include │ + my-jobs)
     row_w = _display_width(output_lines[0].plain) if output_lines else 60
+    # Find where │ sits in the model lines
+    first_plain = output_lines[0].plain if output_lines else ''
+    pipe_pos = first_plain.rfind('│')
+    # Pad total row to align │ at same position
     cur_w = _display_width(total_line.plain)
-    if cur_w < row_w:
-        total_line.append(' ' * (row_w - cur_w), style=bg)
+    if pipe_pos > cur_w:
+        total_line.append(' ' * (pipe_pos - cur_w), style=bg)
+    total_line.append('│', style='bright_black')
+    my_total = Text()
+    my_total.append(' ')
+    if total_my_r:
+        my_total.append(f'▶{total_my_r}', style='bold green')
+    if total_my_pd:
+        if total_my_r:
+            my_total.append(' ')
+        my_total.append(f'⏸{total_my_pd}', style='bold yellow')
+    # Pad to match total row width
+    total_line.append_text(my_total)
+    cur_w2 = _display_width(total_line.plain)
+    if cur_w2 < row_w:
+        total_line.append(' ' * (row_w - cur_w2))
     output_lines.append(total_line)
+
+    subtitle = f'[dim]{user}[/dim]'
 
     content = Text('\n').join(output_lines)
 
     return Panel(
         content,
         title='[bold]speek-[/bold] [dim]v0.0.3[/dim]',
-        subtitle='[dim]Cluster[/dim]',
+        subtitle=subtitle,
         border_style='bright_blue',
         padding=(0, 1),
     )
+
+
+def _fetch_my_gpus(user: str) -> Dict[str, Dict[str, int]]:
+    """Return {partition: {R: gpu_count, PD: gpu_count}} for the user."""
+    out = _run(['squeue', '-u', user, '-o', '%T|%P|%b', '-h'])
+    counts: Dict[str, Dict[str, int]] = defaultdict(lambda: {'R': 0, 'PD': 0})
+    for ln in out.splitlines():
+        if not ln.strip():
+            continue
+        parts = (ln.split('|') + ['', '', ''])[:3]
+        state, part, gres = parts[0].strip().upper(), parts[1].strip(), parts[2].strip()
+        if not part:
+            continue
+        m = _FLEX_RE.search(gres or '')
+        gpus = int(m.group(1)) if m else 1
+        if state == 'RUNNING':
+            counts[part]['R'] += gpus
+        elif state == 'PENDING':
+            counts[part]['PD'] += gpus
+    return dict(counts)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -418,8 +600,10 @@ def build_panel(stats: Dict[str, Dict], term_w: int = 80, term_h: int = 24) -> P
 def main() -> None:
     console = Console()
     w, h = console.size
+    user = args.user or _run(['whoami']).strip()
     stats = _fetch_cluster()
-    panel = build_panel(stats, term_w=w, term_h=h)
+    my_gpus = _fetch_my_gpus(user)
+    panel = build_panel(stats, my_gpus, term_w=w, term_h=h, user=user)
     console.print()
     console.print(Align(panel, align='center'))
     console.print()
