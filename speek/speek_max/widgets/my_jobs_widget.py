@@ -683,27 +683,32 @@ class MyJobsWidget(FoldableTableMixin, Widget):
         div_counter = 0
 
         for proj, items in sorted_projects:
-            # Time divider based on most recent activity in project
-            zone = _hist_zone_idx(_latest_activity(items))
-            if zone != current_zone:
-                if current_zone >= 0:
-                    tree.append(Spacer(key=f'{_HIST_DIV_PREFIX}{div_counter}_sp'))
-                current_zone = zone
-                from datetime import datetime as _dt, timedelta as _td
-                _now = _dt.now()
-                _bounds = [b for b, _ in _HIST_TIME_ZONES]
-                age = _HIST_TIME_ZONES[min(zone, len(_HIST_TIME_ZONES)-1)][1]
-                if zone >= 5:
-                    secs = _bounds[zone]
-                    date_dt = _now - _td(seconds=secs) if secs != float('inf') else _now - _td(seconds=_bounds[zone-1])
-                    date_str = date_dt.strftime('%y-%m-%d')
-                elif zone >= 4:
-                    date_str = (_now - _td(seconds=_bounds[zone])).strftime('%y-%m-%d')
+            # Time divider based on actual date of most recent activity
+            activity = _latest_activity(items)
+            try:
+                from datetime import datetime as _dt
+                act_dt = _dt.strptime(activity.replace('T', ' ').split('.')[0], '%Y-%m-%d %H:%M:%S')
+                dk = act_dt.strftime('%Y-%m-%d')
+                now = _dt.now()
+                delta = (now.date() - act_dt.date()).days
+                weekday = act_dt.strftime('%a')
+                short = act_dt.strftime('%m/%d')
+                if delta == 0:
+                    dlabel = f'Today  {short}'
+                elif delta == 1:
+                    dlabel = f'Yesterday  {short}'
                 else:
-                    date_str = _now.strftime('%H:%M')
+                    dlabel = f'{weekday}  {short}'
+            except Exception:
+                dk = ''
+                dlabel = 'Unknown'
+            if dk != current_zone:
+                if current_zone:
+                    tree.append(Spacer(key=f'{_HIST_DIV_PREFIX}{div_counter}_sp'))
+                current_zone = dk
                 tree.append(Divider(
                     key=f'{_HIST_DIV_PREFIX}{div_counter}',
-                    label=f'{age} {date_str}',
+                    label=dlabel,
                 ))
                 div_counter += 1
 

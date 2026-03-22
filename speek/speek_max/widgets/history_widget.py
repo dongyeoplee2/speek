@@ -125,28 +125,32 @@ def _time_zone_parts(zone_idx: int) -> tuple:
     dt = now - timedelta(seconds=secs)
     return age, dt.strftime('%y-%m-%d')
 
-_TIME_ZONE_BOUNDS = [
-    (3600,         '< 1h'),
-    (86400,        '1h – 24h'),
-    (3 * 86400,    '1d – 3d'),
-    (7 * 86400,    '3d – 7d'),
-    (float('inf'), '> 7d'),
-]
-
-
-def _time_zone_idx(start_str: str) -> int:
-    """Return time-zone index (0=<1h … 4=older)."""
+def _date_key(start_str: str) -> str:
+    """Return the calendar date string (YYYY-MM-DD) for grouping by actual date."""
     try:
         dt = datetime.strptime(
             start_str.replace('T', ' ').split('.')[0], '%Y-%m-%d %H:%M:%S'
         )
-        age = (datetime.now() - dt).total_seconds()
-        for i, (bound, _) in enumerate(_TIME_ZONE_BOUNDS):
-            if age < bound:
-                return i
+        return dt.strftime('%Y-%m-%d')
     except Exception:
-        pass
-    return len(_TIME_ZONE_BOUNDS) - 1
+        return ''
+
+
+def _date_label(date_key: str) -> str:
+    """Return a human-readable label for a date key."""
+    try:
+        dt = datetime.strptime(date_key, '%Y-%m-%d')
+        now = datetime.now()
+        delta = (now.date() - dt.date()).days
+        weekday = dt.strftime('%a')
+        short = dt.strftime('%m/%d')
+        if delta == 0:
+            return f'Today  {short}'
+        if delta == 1:
+            return f'Yesterday  {short}'
+        return f'{weekday}  {short}'
+    except Exception:
+        return date_key
 
 
 _HISTORY_COL_WIDTHS = [12, 3, 3, 2, 6, 5, 7, 7, 8]
@@ -366,17 +370,16 @@ class FullHistoryModal(SpeekModal):
         c_secondary = tc(tv, 'text-secondary', 'default')
 
         state_style = self._state_style_fn(tv)
-        current_zone = -1
+        current_date = ''
         div_counter = 0
         for g in self._groups:
-            zone = _time_zone_idx(g['start'])
-            if zone != current_zone:
-                if current_zone >= 0:  # spacer before divider (skip first)
+            dk = _date_key(g['start'])
+            if dk != current_date:
+                if current_date:  # spacer before divider (skip first)
                     dt.add_row(*[Text('') for _ in range(_N_HISTORY_COLS)], key=f'{_DIV_KEY_PREFIX}{div_counter}_sp')
-                current_zone = zone
-                _age, _date = _time_zone_parts(zone)
+                current_date = dk
+                _label = f'│ {_date_label(dk)}'
                 cells = [Text(' ') for _ in range(_N_HISTORY_COLS)]
-                _label = f'| {_age} {_date}'
                 cells[0] = Text(_label.ljust(22), style='bold black on white')
                 dt.add_row(*cells, key=f'{_DIV_KEY_PREFIX}{div_counter}')
                 div_counter += 1
@@ -824,18 +827,17 @@ class HistoryWidget(FoldableTableMixin, Widget):
         """Build tree: Divider (time zones) -> event groups (FoldGroup if count > 1, else Leaf)
         -> individual events (Leaf)."""
         tree: List[TreeNode] = []
-        current_zone = -1
+        current_date = ''
         div_counter = 0
         for g in groups:
-            zone = _time_zone_idx(g['start'])
-            if zone != current_zone:
-                if current_zone >= 0:
+            dk = _date_key(g['start'])
+            if dk != current_date:
+                if current_date:
                     tree.append(Spacer(key=f'{_DIV_KEY_PREFIX}{div_counter}_sp'))
-                current_zone = zone
-                _age, _date = _time_zone_parts(zone)
+                current_date = dk
                 tree.append(Divider(
                     key=f'{_DIV_KEY_PREFIX}{div_counter}',
-                    label=f'{_age} {_date}',
+                    label=_date_label(dk),
                 ))
                 div_counter += 1
 
