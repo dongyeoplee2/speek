@@ -760,8 +760,10 @@ class StatsWidget(Widget):
                 stacked = self.query_one(_STACKED_ID, Static)
                 stacked.update(chart_text)
                 stacked.display = True
-                self.query_one(_LEGEND_ID, Static).update(_build_user_legend(per_group))
-                self.query_one(_LEGEND_ID).display = True
+                try:
+                    self.query_one(_LEGEND_ID).display = False
+                except Exception:
+                    pass
             else:
                 # Show sparkline, hide stacked chart
                 self.query_one(_SPARKLINE_ID, Sparkline).data = ts['buckets']
