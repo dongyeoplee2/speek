@@ -455,8 +455,9 @@ def build_panel(stats: Dict[str, Dict], my_gpus: Dict,
     has_any_trend = bool(trends)
 
     # Build table
-    from rich.box import HORIZONTALS
-    table = RichTable(show_header=False, show_edge=False, box=HORIZONTALS,
+    from rich.box import Box
+    _THIN_LINE = Box("    \n    \n    \n    \n ╌╌ \n    \n    \n    \n")
+    table = RichTable(show_header=False, show_edge=False, box=_THIN_LINE,
                       pad_edge=False, padding=(0, 1, 0, 0),
                       show_lines=False)
     table.add_column('model', style='bold', no_wrap=True)
