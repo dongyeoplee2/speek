@@ -39,10 +39,10 @@ def _run(cmd: list[str]) -> str:
 
 
 def _usage_emoji(pct: float) -> str:
-    if pct >= 100: return '💀'
-    if pct > 90:   return '🔥'
-    if pct == 0:   return '🏖'
-    if pct < 10:   return '❄'
+    if pct >= 100: return '■'   # full block — fully saturated
+    if pct > 90:   return '▲'   # warning triangle — near capacity
+    if pct == 0:   return '○'   # empty circle — idle
+    if pct < 10:   return '◇'   # diamond — nearly idle
     return ''
 
 
@@ -410,7 +410,13 @@ def _build_model_line(m: str, d: Dict, pending: Dict, my_gpus: Dict,
     else:
         line.append_text(_col(Text(''), w_nodes))
 
-    # My GPU usage after nodes, separated by │ with green bg
+    # Pad left portion to fixed width so │ aligns across all rows
+    left_w = W_MODEL + W_VRAM + 4 + W_BAR + W_CNT + W_DEM + (3 if has_any_trend else 0) + w_nodes
+    cur_w = _display_width(line.plain)
+    if cur_w < left_w:
+        line.append(' ' * (left_w - cur_w))
+
+    # My GPU usage after nodes, separated by │
     mg = my_gpus.get(m, {})
     my_r, my_pd = mg.get('R', 0), mg.get('PD', 0)
     mybg = ''
@@ -565,13 +571,14 @@ def build_panel(stats: Dict[str, Dict], my_gpus: Dict,
     total_my_pd = sum(v.get('PD', 0) for v in my_gpus.values())
     # Measure full row width from model lines (which include │ + my-jobs)
     row_w = _display_width(output_lines[0].plain) if output_lines else 60
-    # Find where │ sits in the model lines
+    # Find display position of │ in the first model line
     first_plain = output_lines[0].plain if output_lines else ''
-    pipe_pos = first_plain.rfind('│')
-    # Pad total row to align │ at same position
+    pipe_char_pos = first_plain.rfind('│')
+    pipe_display_pos = _display_width(first_plain[:pipe_char_pos]) if pipe_char_pos >= 0 else row_w
+    # Pad total row to align │ at same display position
     cur_w = _display_width(total_line.plain)
-    if pipe_pos > cur_w:
-        total_line.append(' ' * (pipe_pos - cur_w), style=bg)
+    if pipe_display_pos > cur_w:
+        total_line.append(' ' * (pipe_display_pos - cur_w), style=bg)
     total_line.append('│', style='bright_black')
     my_total = Text()
     my_total.append(' ')
