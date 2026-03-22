@@ -120,7 +120,7 @@ def build_cluster_renderable(
     # green, yellow/orange, red per the base16 mapping (base0B/base09/base08)
     _c_green  = tc(tv, 'success', 'green')
     _c_yellow = tc(tv, 'warning', 'yellow')
-    _c_red    = tc(tv, 'error',   'red')
+    _c_red    = '#CC3333'  # true red, not theme's pinkish error color
 
     def _util_color(pct: float) -> str:
         if pct >= 1.0:  return _c_red

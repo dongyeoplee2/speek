@@ -398,7 +398,7 @@ class QueueWidget(FoldableTableMixin, Widget):
             # Color matches cluster bar: green <50%, yellow 50-99%, red 100%
             tv = self.app.theme_variables
             if pct >= 1.0:
-                bar_color = tc(tv, 'error', 'red')
+                bar_color = '#CC3333'
             elif pct >= 0.50:
                 bar_color = tc(tv, 'warning', 'yellow')
             else:
