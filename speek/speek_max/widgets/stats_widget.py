@@ -752,20 +752,15 @@ class StatsWidget(Widget):
                 sparkline = self.query_one(_SPARKLINE_ID, Sparkline)
                 sparkline.display = False
                 peak = ts.get('peak', 0)
-                # Use actual widget width, not config buckets
                 try:
                     chart_w = sparkline.size.width or 60
                 except Exception:
                     chart_w = 60
                 chart_text = _render_stacked_chart(per_group, peak, chart_w)
-                buf = StringIO()
-                _RCon(file=buf, force_terminal=True, width=200, no_color=False).print(chart_text, end='')
-                self.query_one(_STACKED_ID, Static).update(buf.getvalue())
-                self.query_one(_STACKED_ID).display = True
-                legend = _build_user_legend(per_group)
-                buf2 = StringIO()
-                _RCon(file=buf2, force_terminal=True, width=200, no_color=False).print(legend, end='')
-                self.query_one(_LEGEND_ID, Static).update(buf2.getvalue())
+                stacked = self.query_one(_STACKED_ID, Static)
+                stacked.update(chart_text)
+                stacked.display = True
+                self.query_one(_LEGEND_ID, Static).update(_build_user_legend(per_group))
                 self.query_one(_LEGEND_ID).display = True
             else:
                 # Show sparkline, hide stacked chart
