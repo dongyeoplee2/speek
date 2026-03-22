@@ -734,18 +734,15 @@ class StatsWidget(Widget):
         # sparkline + y-max label
         is_user_dim = self._dim == 'user' and per_group
         try:
-            # Toggle sparkline vs stacked chart visibility
-            self.query_one(_SPARKLINE_ID, Sparkline).display = not is_user_dim
-            self.query_one(_STACKED_ID).display = is_user_dim
-            self.query_one(_LEGEND_ID).display = is_user_dim
-
-            # Always use the Sparkline widget for the main chart
+            # Always show sparkline, hide stacked chart
             self.query_one(_SPARKLINE_ID, Sparkline).data = ts['buckets']
             self.query_one(_SPARKLINE_ID, Sparkline).display = True
-            self.query_one(_STACKED_ID).display = False
+            try:
+                self.query_one(_STACKED_ID).display = False
+            except Exception:
+                pass
 
             if is_user_dim:
-                # Show user color legend below sparkline
                 from io import StringIO
                 from rich.console import Console as _RCon
                 legend = _build_user_legend(per_group)
@@ -754,7 +751,10 @@ class StatsWidget(Widget):
                 self.query_one(_LEGEND_ID, Static).update(buf.getvalue())
                 self.query_one(_LEGEND_ID).display = True
             else:
-                self.query_one(_LEGEND_ID).display = False
+                try:
+                    self.query_one(_LEGEND_ID).display = False
+                except Exception:
+                    pass
 
             peak = ts.get('peak', 0)
             self._last_peak = peak
