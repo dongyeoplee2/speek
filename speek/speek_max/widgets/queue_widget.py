@@ -327,12 +327,23 @@ class QueueWidget(FoldableTableMixin, Widget):
                 pass
             partition_count[part] += int(cells[1].plain) if cells[1].plain else 1
 
-        # Sort partitions by total GPU usage descending
-        partition_order.sort(key=lambda p: -partition_gpus.get(p, 0))
+        # Sort partitions to match cluster bar order + get usage for coloring
+        from speek.speek_max.slurm import fetch_cluster_stats
+        part_usage: Dict[str, float] = {}
+        try:
+            cstats = fetch_cluster_stats()
+            order = sorted(cstats, key=lambda m: cstats[m]['Total'], reverse=True)
+            rank = {m: i for i, m in enumerate(order)}
+            partition_order.sort(key=lambda p: rank.get(p, 999))
+            for p in partition_order:
+                cs = cstats.get(p, {})
+                total, used = cs.get('Total', 0), cs.get('Used', 0)
+                part_usage[p] = used / total if total else 0.0
+        except Exception:
+            partition_order.sort(key=lambda p: -partition_gpus.get(p, 0))
 
         # Prune collapsed set to only current partitions
-        valid = set(partition_order)
-        self._ctx.collapsed &= valid
+        self._ctx.collapsed &= set(partition_order)
 
         tree: List[TreeNode] = []
         for part in partition_order:
@@ -370,7 +381,8 @@ class QueueWidget(FoldableTableMixin, Widget):
             tree.append(FoldGroup(
                 key=f'div::{part}',
                 fold_key=part,
-                data={'label': part.upper(), 'count_cell': count_cell, 'gpu_cell': gpu_cell},
+                data={'label': part.upper(), 'count_cell': count_cell, 'gpu_cell': gpu_cell,
+                      'usage_pct': part_usage.get(part, 0.0)},
                 children=children,
                 mode=FoldMode.COLLAPSED_SET,
                 indent=0,
@@ -380,11 +392,35 @@ class QueueWidget(FoldableTableMixin, Widget):
     def _render_cell(self, node: TreeNode, is_collapsed: bool, n_cols: int) -> List[Text]:
         """Render a tree node into a list of Text cells."""
         if isinstance(node, FoldGroup) and node.mode == FoldMode.COLLAPSED_SET:
-            # Partition divider with fold icon
+            # Partition divider with usage-proportional background
             d = node.data
-            div = Divider(key=node.key, label=d['label'],
-                          extra_cells={1: d['count_cell'], 3: d['gpu_cell']})
-            return _build_divider_cells(self._ctx, div)
+            pct = d.get('usage_pct', 0.0)
+            # Color matches cluster bar: green <50%, yellow 50-99%, red 100%
+            tv = self.app.theme_variables
+            if pct >= 1.0:
+                bar_color = tc(tv, 'error', 'red')
+            elif pct >= 0.50:
+                bar_color = tc(tv, 'warning', 'yellow')
+            else:
+                bar_color = tc(tv, 'success', 'green')
+
+            w = self._ctx.name_col_width
+            label = d['label']
+            # Build name cell with proportional colored fill
+            filled = max(1, int(round(pct * w))) if pct > 0 else 0
+            empty_w = w - filled
+            name_cell = Text()
+            name_cell.append(f'│ {label}'[:filled].ljust(filled), style=f'bold white on {bar_color}')
+            if empty_w > 0:
+                # Remaining label text without background
+                remaining = f'│ {label}'[filled:]
+                name_cell.append(remaining.ljust(empty_w)[:empty_w], style='bold')
+
+            cells = [Text(' ') for _ in range(self._ctx.n_cols)]
+            cells[self._ctx.name_col_idx] = name_cell
+            cells[1] = d['count_cell']
+            cells[3] = d['gpu_cell']
+            return cells
 
         if isinstance(node, FoldGroup) and node.mode == FoldMode.EXPANDED_SET:
             # Job group header
