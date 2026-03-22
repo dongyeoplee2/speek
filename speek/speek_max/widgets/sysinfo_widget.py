@@ -334,10 +334,9 @@ class SysInfoWidget(Widget):
         table.add_column('Description', style='dim')
 
         for f in factors:
-            name = f.get('name', '—')
-            weight = str(f.get('weight', 0))
-            desc = f.get('description', '')
-            if f.get('weight', 0) == 0:
+            # factors are tuples: (name, weight_str, description)
+            name, weight, desc = f[0], str(f[1]), f[2]
+            if weight in ('0', 'None', ''):
                 table.add_row(f'[dim]{name}[/dim]', f'[dim]{weight}[/dim]',
                               f'[dim](disabled)[/dim]')
             else:
