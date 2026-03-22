@@ -920,12 +920,14 @@ class MyJobsWidget(FoldableTableMixin, Widget):
         projects: Dict, part_ranked: Dict, part_rank_index: Dict,
         stats_text: Optional[Text], n_run: int, n_pend: int, colors: tuple,
     ) -> None:
-        # Always hide loading indicator and show empty state if needed
+        # Always hide loading indicator, stats bar, and show empty state if needed
         self.query_one(LoadingIndicator).display = False
         empty = self.query_one('#myjobs-empty', Static)
+        stats_bar = self.query_one('#myjobs-stats', Static)
         if not rows:
             empty.update(f'No active or pending jobs for {self.user}')
             empty.display = True
+            stats_bar.display = False
         else:
             empty.display = False
 
