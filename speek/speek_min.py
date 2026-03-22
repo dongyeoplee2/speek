@@ -398,10 +398,8 @@ def _build_model_line(m: str, d: Dict, pending: Dict, my_gpus: Dict,
     # Difference: emoji rows are 1 cell wider. But since we use len() for
     # padding before │, the extra visual cell is absorbed.
     # Actually: just make len() identical for both paths.
-    if emoji:
-        line.append(emoji)
-    else:
-        line.append(' ')
+    emoji_t = Text(emoji if emoji else '')
+    line.append_text(_col(emoji_t, 2))
     line.append_text(_bar(U, T, W_BAR))
     line.append_text(_col(cnt_t, W_CNT))
     line.append_text(_col(dem_t, W_DEM))
@@ -590,11 +588,8 @@ def build_panel(stats: Dict[str, Dict], my_gpus: Dict,
     tcnt.append(f'/{total_T}', style=f'bright_black {bg}')
     total_line.append_text(_col(tname, col_widths['model']))
     total_line.append_text(_col(Text('', style=bg), col_widths['vram']))
-    emoji_t = _usage_emoji(total_pct * 100)
-    if emoji_t:
-        total_line.append(emoji_t, style=bg)
-    else:
-        total_line.append(' ', style=bg)
+    total_emoji = Text(_usage_emoji(total_pct * 100) or '', style=bg)
+    total_line.append_text(_col(total_emoji, 2))
     total_line.append_text(_bar(total_U, total_T, col_widths['bar']))
     total_line.append_text(_col(tcnt, col_widths['cnt']))
     # Pad to same │ position as model lines (use len, not display_width — matches model rows)
