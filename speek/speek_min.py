@@ -395,7 +395,7 @@ def _build_model_line(m: str, d: Dict, pending: Dict, my_gpus: Dict,
     if emoji:
         line.append(f'{emoji} ')
     else:
-        line.append('  ')
+        line.append('   ')  # 3 spaces = same width as emoji(2) + space(1)
     line.append_text(_bar(U, T, W_BAR))
     line.append_text(_col(cnt_t, W_CNT))
     line.append_text(_col(dem_t, W_DEM))
