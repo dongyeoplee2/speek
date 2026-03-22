@@ -966,7 +966,7 @@ class StatsWidget(Widget):
         # per-group sparklines in scrollable area
         if per_group:
             try:
-                scroll = self.query_one('#stats-breakdown-scroll', VerticalScroll)
+                scroll = self.query_one('#stats-breakdown-scroll', Vertical)
                 scroll.remove_children()
                 # Sort by total GPU hours descending
                 sorted_groups = sorted(
