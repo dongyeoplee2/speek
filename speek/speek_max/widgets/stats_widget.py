@@ -449,6 +449,7 @@ class StatsWidget(Widget):
     def compose(self) -> ComposeResult:
         # ── toolbar ───────────────────────────────────────────────────────────
         with Horizontal(id='stats-toolbar'):
+            yield Button('Now', id='stats-dim-now', classes='stats-dim-btn')
             for d in _DIMS:
                 yield Button(d.capitalize(), id=f'stats-dim-{d}',
                              classes='stats-dim-btn')
@@ -480,11 +481,13 @@ class StatsWidget(Widget):
             yield Button('Apply', id='stats-cust-apply',
                          classes='stats-apply-btn')
 
-        with VerticalScroll(id='stats-scroll'):
-            # ── now dashboard ────────────────────────────────────────────────
+        # ── Dashboard view (shown when "Now" selected) ────────────────────
+        with VerticalScroll(id='stats-dashboard-view'):
             yield Static('', id='stats-dashboard', markup=True)
 
-            # ── chart area ───────────────────────────────────────────────────
+        # ── Chart view (shown for Cluster/Partition/Node/User/Issues) ────
+        with VerticalScroll(id='stats-chart-view'):
+            # ── chart area ───────────────────────────────────────────────
             with Vertical(id='stats-chart-area'):
                 with Horizontal(id='stats-chart-header'):
                     yield Static('', id='stats-chart-title', markup=True)
@@ -496,18 +499,18 @@ class StatsWidget(Widget):
                         yield Static('', id='stats-x-axis')
                         yield Static('', id='stats-hover-info', markup=True)
 
-            # ── summary bar ──────────────────────────────────────────────────
+            # ── summary bar ──────────────────────────────────────────────
             with Horizontal(id='stats-summary'):
                 yield Label('', id='stats-lbl-total',   markup=True)
                 yield Label('', id='stats-lbl-peak',    markup=True)
                 yield Label('', id='stats-lbl-jobs',    markup=True)
                 yield Label('', id='stats-lbl-loading', markup=True)
 
-            # ── per-group sparklines ─────────────────────────────────────────
+            # ── per-group sparklines ─────────────────────────────────────
             with Vertical(id='stats-breakdown-scroll'):
                 pass  # populated dynamically
 
-            # ── issue stats (chart + table) ──────────────────────────────────
+            # ── issue stats (chart + table) ──────────────────────────────
             with Vertical(id='stats-issues'):
                 yield Static('', id='stats-issue-chart', markup=True)
                 yield Static('', id='stats-issue-table', markup=True)
@@ -515,13 +518,15 @@ class StatsWidget(Widget):
     def on_mount(self) -> None:
         self._w_sparkline = self.query_one(_SPARKLINE_ID, Sparkline)
         self._w_hover     = self.query_one(_HOVER_INFO_ID, Static)
+        self._dim = 'now'
         self._update_dim_btns()
         self.query_one(_FILTER_BAR).display = False
         self.query_one('#stats-custom-bar').display = False
         self.query_one(_ISSUES_ID).display = False
+        # Start on dashboard view
+        self.query_one('#stats-dashboard-view').display = True
+        self.query_one('#stats-chart-view').display = False
         self._load_dashboard()
-        self._load()
-        self._load_issues()
 
     # ── Button / select handlers ───────────────────────────────────────────────
 
@@ -551,9 +556,20 @@ class StatsWidget(Widget):
     def _set_dim(self, dim: str) -> None:
         self._dim = dim
         self._update_dim_btns()
+        is_now = dim == 'now'
         is_issues = dim == 'issues'
-        # show/hide the two content areas
-        for wid in ('#stats-chart-area', '#stats-summary', '#stats-breakdown'):
+        # Toggle between dashboard view and chart view
+        try:
+            self.query_one('#stats-dashboard-view').display = is_now
+            self.query_one('#stats-chart-view').display = not is_now
+        except Exception:
+            pass
+        if is_now:
+            self.query_one(_FILTER_BAR).display = False
+            self._load_dashboard()
+            return
+        # show/hide chart vs issues within chart view
+        for wid in ('#stats-chart-area', '#stats-summary', '#stats-breakdown-scroll'):
             try:
                 self.query_one(wid).display = not is_issues
             except Exception:
@@ -588,7 +604,7 @@ class StatsWidget(Widget):
             self._load()
 
     def _update_dim_btns(self) -> None:
-        for d in list(_DIMS) + ['issues']:
+        for d in ['now'] + list(_DIMS) + ['issues']:
             try:
                 self.query_one(f'#stats-dim-{d}', Button).set_class(
                     d == self._dim, '--active')

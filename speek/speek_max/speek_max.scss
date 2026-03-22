@@ -1226,7 +1226,13 @@ StatsWidget {
   background: $background;
 }
 
-#stats-scroll {
+#stats-dashboard-view {
+  height: 1fr;
+  width: 1fr;
+  background: $background;
+}
+
+#stats-chart-view {
   height: 1fr;
   width: 1fr;
   background: $background;
