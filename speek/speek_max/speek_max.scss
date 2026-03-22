@@ -206,15 +206,19 @@ Input {
 }
 
 /* ── Button ─────────────────────────────────────────────────────────────── */
-Button {
+/* Toolbar/inline buttons: compact, no border */
+.stats-dim-btn,
+.stats-icon-btn,
+.stats-apply-btn,
+.si-actions Button {
   padding: 0 1;
   height: 1;
   border: none;
   background: $background;
+}
 
-  &:disabled {
-    opacity: 40%;
-  }
+Button:disabled {
+  opacity: 40%;
 }
 
 /* ── Select / Dropdown ─────────────────────────────────────────────────── */
@@ -506,7 +510,8 @@ ClusterBar {
 QueueWidget,
 NodeWidget,
 PriorityWidget,
-UsersWidget {
+UsersWidget,
+LogsWidget {
   height: 1fr;
   background: $background;
   border: round $accent 40%;
@@ -652,6 +657,21 @@ SettingsWidget {
   background: $background;
 }
 
+.config-btn-row {
+  height: 1;
+  width: 1fr;
+  padding: 0;
+  align: left middle;
+  background: $background;
+}
+
+.config-btn-row Button {
+  width: auto;
+  min-width: 0;
+  max-width: 16;
+}
+
+
 .config-label {
   width: 20;
   color: $text;
@@ -727,32 +747,15 @@ Checkbox {
 }
 
 /* ── Settings action buttons ───────────────────────────────────────────── */
+
+
+
 #settings-actions {
-  height: 1;
+  height: auto;
   width: 1fr;
   margin-top: 1;
   padding: 0;
   background: $background;
-}
-
-#settings-save-btn {
-  background: $success-muted;
-  color: $text-success;
-  text-style: bold;
-  min-width: 14;
-  height: 1;
-  border: none;
-  padding: 0 1;
-}
-
-#settings-reset-btn {
-  background: $error-muted;
-  color: $text-error;
-  min-width: 14;
-  height: 1;
-  border: none;
-  padding: 0 1;
-  margin-left: 1;
 }
 
 #settings-status {
@@ -772,6 +775,21 @@ Checkbox {
   background: $border-blurred;
   border-top: solid $border;
   color: $foreground;
+}
+
+/* ── Queue log tab ─────────────────────────────────────────────────────── */
+#queue-log-scroll {
+  height: 1fr;
+  padding: 0 1;
+}
+
+.queue-log-output {
+  color: $text-muted;
+  padding: 0 0 0 2;
+}
+
+.queue-log-spacer {
+  height: 1;
 }
 
 /* ── History toolbar ────────────────────────────────────────────────────── */
@@ -893,7 +911,7 @@ CancelSelectModal {
 /* ── CommandBar ─────────────────────────────────────────────────────────── */
 CommandBar {
   height: auto;
-  background: $background;
+  background: black;
   border: none;
   padding: 0 1;
   margin: 0;
@@ -904,14 +922,14 @@ CommandBar {
   height: auto;
   max-height: 8;
   width: 1fr;
-  background: $background;
+  background: black;
   border: round $border;
   padding: 0;
   color: $foreground;
   margin-bottom: 1;
 
   & > .option-list--option {
-    background: $background;
+    background: black;
     padding: 0 2;
   }
 
@@ -928,7 +946,7 @@ CommandBar {
 
 #cmd-bar {
   width: 1fr;
-  background: $background;
+  background: black;
   border: round white;
   height: 3;
   padding: 0 1;
@@ -946,11 +964,12 @@ CommandBar {
   width: 1fr;
   height: 1;
   border: none;
-  background: $background;
+  background: black;
   padding: 0;
 
   &:focus {
     border: none;
+    background: black;
     padding: 0;
   }
 }
@@ -959,7 +978,7 @@ CommandBar {
   width: auto;
   padding: 0 1;
   color: $text-muted;
-  background: $background;
+  background: black;
 }
 
 #cmd-copy-btn,

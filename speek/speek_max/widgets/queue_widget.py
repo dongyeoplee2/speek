@@ -12,7 +12,7 @@ from textual.widget import Widget
 from textual.widgets import Label, LoadingIndicator, Static
 
 from speek.speek_max.slurm import fetch_all_priorities, fetch_job_details, fetch_job_stats, fetch_queue
-from speek.speek_max._utils import fmt_time, tc, safe, state_sym
+from speek.speek_max._utils import fmt_time, tc, safe, state_sym, job_name_cell as _job_name_cell
 from speek.speek_max.widgets.datatable import SpeekDataTable
 from speek.speek_max.widgets.foldable_table import (
     FoldableTableMixin, FoldGroup, FoldMode, Leaf, Divider, Spacer,
@@ -362,7 +362,7 @@ class QueueWidget(FoldableTableMixin, Widget):
                 if count > 1:
                     # Job group as FoldGroup with EXPANDED_SET
                     ind_children = [
-                        Leaf(key=f'ind::{job["jid"]}', data=job, indent=7)
+                        Leaf(key=f'ind::{job["jid"]}', data=job, indent=6)
                         for job in jobs
                     ]
                     children.append(FoldGroup(
@@ -371,13 +371,13 @@ class QueueWidget(FoldableTableMixin, Widget):
                         data={'cells': cells, 'jobs': jobs, 'row_key': row_key},
                         children=ind_children,
                         mode=FoldMode.EXPANDED_SET,
-                        indent=3,
+                        indent=2,
                     ))
                 else:
                     children.append(Leaf(
                         key=rk,
                         data={'cells': cells, 'jobs': jobs, 'row_key': row_key},
-                        indent=3,
+                        indent=2,
                     ))
 
             tree.append(FoldGroup(
@@ -433,9 +433,9 @@ class QueueWidget(FoldableTableMixin, Widget):
             count = len(jobs)
             if count > 1:
                 icon = '▼' if not is_collapsed else '▶'
-                cells[0] = Text(f'   {icon} {orig_name}')
+                cells[0] = Text(f'  {icon} {orig_name}')
             else:
-                cells[0] = Text(f'     {orig_name}')
+                cells[0] = Text(f'    {orig_name}')
             rk = str(d['row_key'])
             return [
                 _color_flash(cells[i], self._ping.cell_intensity(rk, i))
@@ -443,7 +443,7 @@ class QueueWidget(FoldableTableMixin, Widget):
             ]
 
         if isinstance(node, Leaf):
-            if node.indent == 7:
+            if node.indent == 6:
                 # Individual job under an expanded group
                 job = node.data
                 tv = self.app.theme_variables
@@ -452,7 +452,7 @@ class QueueWidget(FoldableTableMixin, Widget):
                 job_start = job.get('start', '')
                 job_ago = fmt_time(job_start) if job_start and job_start not in ('N/A', 'Unknown') else '—'
                 return [
-                    Text(f'   {"└" if node.is_last else "├"}── {job["name"]}', style=c_m),
+                    _job_name_cell(f'  {"└" if node.is_last else "├"}── ', job['name'], job['jid'], c_m),
                     Text(''),
                     Text(job['user'], style=c_m),
                     Text(gpu_s, style=c_m),
@@ -467,8 +467,11 @@ class QueueWidget(FoldableTableMixin, Widget):
                 d = node.data
                 cells = list(d['cells'])
                 jobs = d['jobs']
-                orig_name = jobs[0]['name'] if jobs else cells[0].plain.strip()
-                cells[0] = Text(f'     {orig_name}')
+                job = jobs[0] if jobs else {}
+                tv = self.app.theme_variables
+                c_m = tc(tv, 'text-muted', 'bright_black')
+                cells[0] = _job_name_cell('    ', job.get('name', ''), job.get('jid', ''),
+                                          c_m, single=True)
                 rk = str(d['row_key'])
                 return [
                     _color_flash(cells[i], self._ping.cell_intensity(rk, i))
@@ -562,3 +565,4 @@ class QueueWidget(FoldableTableMixin, Widget):
 
     def action_refresh(self) -> None:
         self._load()
+

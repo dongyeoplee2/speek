@@ -78,6 +78,24 @@ _BUILTIN_SUGGESTIONS: list[tuple[str, str]] = [
     ('/theme ',                 'switch theme'),
     ('/q',                     'quit speek-max'),
     ('/help',                  'show slash commands'),
+    # speek+ shortcuts
+    ('q',                      'quit speek+'),
+    ('exit',                   'quit speek+'),
+    # speek+ tab keys (info only — these work from keyboard, not shell)
+    ('1',                      '[key] Queue tab'),
+    ('2',                      '[key] Nodes tab'),
+    ('3',                      '[key] Users tab'),
+    ('4',                      '[key] Stats tab'),
+    ('5',                      '[key] Logs tab'),
+    ('6',                      '[key] Settings tab'),
+    ('7',                      '[key] Info tab'),
+    ('8',                      '[key] Help tab'),
+    ('v',                      '[key] fold/unfold group'),
+    ('d',                      '[key] job detail popup'),
+    ('r',                      '[key] refresh'),
+    ('l',                      '[key] log/detail popup'),
+    ('x',                      '[key] cancel selected job'),
+    ('Tab',                    '[key] cycle focus'),
 ]
 
 # Per-command flag suggestions: (flag, description)
@@ -474,10 +492,9 @@ class CommandBar(Widget):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != 'cmd-input':
             return
-        # If suggestions visible, accept the highlighted one first
+        # Hide suggestions but run what the user typed, not the suggestion
         if self._suggestions_visible:
-            self._accept_suggestion()
-            return
+            self._hide_suggestions()
         raw = event.value.strip()
         if not raw:
             return
@@ -509,7 +526,10 @@ class CommandBar(Widget):
         if event.key == 'tab':
             event.prevent_default()
             event.stop()  # Don't let App intercept Tab for focus cycling
-            self._do_tab_complete(inp)
+            if self._suggestions_visible:
+                self._accept_suggestion()
+            else:
+                self._do_tab_complete(inp)
             return
 
         if self._suggestions_visible:
@@ -528,8 +548,7 @@ class CommandBar(Widget):
                     self._history_up(inp)
                 return
             elif event.key == 'enter':
-                event.prevent_default()
-                self._accept_suggestion()
+                # Enter runs what the user typed; don't intercept
                 return
 
         if event.key == 'up':
@@ -791,15 +810,45 @@ class CommandBar(Widget):
         self, cmd: str, cur: str, base: str, _add,
     ) -> None:
         """Add recent scripts from SLURM jobs and local .sh/.py files."""
-        if cur or cmd not in ('sbatch', 'srun'):
+        if cmd not in ('sbatch', 'srun'):
+            return
+        if cur and not cur.startswith('-'):
+            # User is typing a path — add matching dirs from history
+            for d in self._get_history_dirs():
+                if d.lower().startswith(cur.lower()):
+                    _add(base + d, 'recent dir')
+            return
+        if cur:
             return
         # Scripts from running + recent SLURM jobs (cached)
         for path, desc in self._get_cached_scripts():
             _add(base + path, desc)
+        # Directories from past sbatch commands
+        for d in self._get_history_dirs():
+            _add(base + d, 'recent dir')
         # Local .sh/.py files
         for val, desc in self._path_completions(base, '.'):
             if val.endswith(('.sh', '.py', '/')):
                 _add(val, desc)
+
+    def _get_history_dirs(self) -> List[str]:
+        """Extract unique directories from past sbatch/srun commands in history."""
+        import os.path
+        dirs: list[str] = []
+        seen: set[str] = set()
+        for h in self._history:
+            parts = h.split()
+            if not parts or parts[0] not in ('sbatch', 'srun'):
+                continue
+            for token in parts[1:]:
+                if token.startswith('-'):
+                    continue
+                d = os.path.dirname(token)
+                if d and d not in seen:
+                    seen.add(d)
+                    dirs.append(d + '/')
+                break
+        return dirs
 
     def _add_flag_suggestions(
         self, cmd: str, cur: str, full: str, base: str, _add,
@@ -956,6 +1005,12 @@ class CommandBar(Widget):
 
         self._push_history(raw)
 
+        # Block running speek+ inside speek+
+        first = raw.strip().split()[0] if raw.strip() else ''
+        if first in ('speek', 'speek+', 'speek-max', 'speek_max'):
+            self._show_status('[bold yellow]⚠ Cannot run speek+ inside speek+[/bold yellow]')
+            return
+
         # Handle cd specially (can't change cwd from a subprocess)
         if raw.strip() == 'cd' or raw.strip().startswith('cd '):
             self._handle_cd(raw.strip())
@@ -964,12 +1019,22 @@ class CommandBar(Widget):
         self._show_status('[dim]running…[/dim]')
         cwd = self._cwd or None
 
+        # Set COLUMNS to match the Logs tab width so output formats correctly
+        import os as _os
+        env = _os.environ.copy()
+        try:
+            from speek.speek_max.widgets.logs_widget import LogsWidget
+            logs_w = self.app.query_one(LogsWidget)
+            env['COLUMNS'] = str(max(40, logs_w.size.width - 4))
+        except Exception:
+            pass
+
         def _run():
             try:
                 out = subprocess.check_output(
                     raw, shell=True, text=True,
                     stderr=subprocess.STDOUT, timeout=60,
-                    cwd=cwd,
+                    cwd=cwd, env=env,
                 )
                 self.app.call_from_thread(self._on_success, raw, out.strip())
             except subprocess.CalledProcessError as e:

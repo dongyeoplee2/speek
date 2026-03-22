@@ -11,6 +11,8 @@ from rich.table import Table
 from rich.align import Align
 from rich.live import Live
 from rich.console import Group
+from rich.panel import Panel
+from rich.text import Text as RText
 
 parser = argparse.ArgumentParser(description="Peek into slurm resource info.")
 parser.add_argument('-u', '--user', default=None, type=str, help='Specify highlighted user.')
@@ -261,23 +263,27 @@ def get_slurm_resource():
     ranking = {0:'🥇', 1:'🥈', 2:'🥉'}
     get_state = lambda p: ('☠️ ' if p==100 else '🔥' if p>90 else '🏖️ ' if p==0 else '❄️ ' if p<10 else '') #+' '
     pareto = '🚩'
-    king = {'RUNNING':'👑', 'PENDING':'⏳'}
+    king = {'RUNNING':'', 'PENDING':''}
 
-    table1 = Table(title="Cluster Usage")
+    table1 = Table(show_header=True, show_edge=False, box=None,
+                   pad_edge=False, padding=(0, 1, 0, 0))
 
     # add columns
     partitions_list = [p for p in sorted({*partitions.keys()} - resource) if _gpu_weight(partitions, p, gres) > 0.0]
     partitions_list = sorted(partitions_list, key=lambda x: gpu_resource[x]['Total'] * _gpu_weight(partitions, x, gres), reverse=True)
-    table1.add_column("User")
+    table1.add_column("User", style='bold', no_wrap=True)
     for i, p in enumerate(partitions_list):
-        table1.add_column(get_state(float(gpu_resource[p]['Usage'][:-1])) + p, justify="right")
-    table1.add_column("Total", justify="right")
+        table1.add_column(get_state(float(gpu_resource[p]['Usage'][:-1])) + p, justify="right", no_wrap=True)
+    table1.add_column("Total", justify="right", style='bold', no_wrap=True)
 
 
     # add rows
-    for f in ['Available', 'Total', 'Usage']:
-        table1.add_row(f, *[str(gpu_resource[p][f]) for p in partitions_list], str(gpu_resource[f]))
-    table1.add_row(f'Until release (~{t_width}{td_str[t_unit][0]})', *[gpu_resource[p].get('Upcomming release', [{}])[0].get('str', '') for p in partitions_list], '', end_section=True)
+    table1.add_row(RText('GPUs', style='dim', justify='right'),
+                   *[f'{gpu_resource[p]["Available"]}/{gpu_resource[p]["Total"]}' for p in partitions_list],
+                   f'{gpu_resource["Available"]}/{gpu_resource["Total"]}')
+    table1.add_row(RText('Usage', style='dim', justify='right'),
+                   *[str(gpu_resource[p]['Usage']) for p in partitions_list],
+                   str(gpu_resource['Usage']), end_section=True)
 
     user_status_sorted = sorted(user_status.items(), key=lambda x: (x[1]['RUNNING'], x[1]['PENDING']), reverse=True)
     agg_running = 0
@@ -294,12 +300,17 @@ def get_slurm_resource():
         rank = ranking.get(i, i+1 if agg_running<all_running*0.8 else pareto)
         
         user_true = user_lookup.get(user, user)
-        state_str = lambda state: (f"{v}" if (v:=state['RUNNING']) else '') + (f"({v})" if (v:=state['PENDING']) else '')
+        state_str = lambda state: (f"▶{v}" if (v:=state['RUNNING']) else '') + (f" ⏸{v}" if (v:=state['PENDING']) else '').strip()
         king_str = lambda p: ''.join([king[s] for s in sorted(status) if user==gpu_resource[p][f'max_{s}_user']])
         table1.add_row(f'{rank:>2}. {user_true}', *[king_str(p)+state_str(info.get(p, NewState(status))) for p in partitions_list], state_str(info), style=style, end_section=me_section)
     
-    tables.append(' \n')
-    tables.append(Align(table1, align='center'))
+    tables.append(Align.center(Panel(
+        table1,
+        title='[bold]Cluster Usage[/bold]',
+        border_style='bright_blue',
+        padding=(0, 1),
+        expand=False,
+    )))
     # print(' \n ')
     # print(Align(table1, align='center'))
 
@@ -311,10 +322,14 @@ def get_slurm_resource():
     jobs = user_job_status.get(me, {})
 
     if jobs:
-        table2 = Table(title=f"{user_lookup.get(me, me)}'s Job Status")
+        table2 = Table(show_header=True, show_edge=False, box=None,
+                       pad_edge=False, padding=(0, 1, 0, 0))
 
-        for c in ['Status', 'Job', 'GPU', '#', 'ids']:
-            table2.add_column(c)
+        table2.add_column('St', style='bold', no_wrap=True)
+        table2.add_column('Job', no_wrap=True)
+        table2.add_column('GPU', no_wrap=True)
+        table2.add_column('#', justify='right', no_wrap=True)
+        table2.add_column('IDs', no_wrap=True, max_width=30)
         for s in sorted(status, reverse=True):
             jobs_f = {k: {jn: j for jn, j in v.items() if j[s]} for k, v in jobs.items() if any(j[s] for j in v.values())}
             for i, (job_name, job) in enumerate(jobs_f.items()):
@@ -328,15 +343,21 @@ def get_slurm_resource():
                     ids = job[gpu][s]
                     if isinstance(gpu, tuple):
                         gpu = '{' + ',\n '.join(gpu) + '}'
-                    table2.add_row(s if i+j==0 else '', job_name if j==0 else '', gpu, str(len(ids)), consecutor([id for id, _ in ids]), end_section=((i==len(jobs_f)-1) and (j==len(job_sorted)-1)))
+                    _sym = '▶' if s == 'RUNNING' else '⏸' if s == 'PENDING' else s
+                    _scol = 'bold green' if s == 'RUNNING' else 'bold yellow' if s == 'PENDING' else ''
+                    table2.add_row(RText(_sym, style=_scol) if i+j==0 else RText(''), job_name if j==0 else '', gpu, str(len(ids)), consecutor([id for id, _ in ids]), end_section=((i==len(jobs_f)-1) and (j==len(job_sorted)-1)))
             
         # print(' \n ')
         # print(Align(table2, align='center'))
         # print(' \n ')
         
-        tables.append(' \n ')
-        tables.append(Align(table2, align='center'))
-        tables.append(' \n ')
+        tables.append(Align.center(Panel(
+            table2,
+            title=f'[bold]{user_lookup.get(me, me)}\'s Jobs[/bold]',
+            border_style='bright_blue',
+            padding=(0, 1),
+            expand=False,
+        )))
 
     # table3 = Table(title="Job Status")
 

@@ -346,6 +346,7 @@ class JobInfoModal(SpeekModal):
         job_ids: Optional[List[str]] = None,
         current_idx: int = 0,
         initial_pane: str = _DETAIL_PANE,
+        cached_analysis: Optional[Dict] = None,
     ) -> None:
         super().__init__()
         self._job_id       = job_id
@@ -356,6 +357,7 @@ class JobInfoModal(SpeekModal):
         self._idx          = current_idx
         self._log_cursor   = 0   # byte offset; 0 = not yet loaded incrementally
         self._initial_pane = initial_pane
+        self._cached_analysis = cached_analysis
 
     def compose(self) -> ComposeResult:
         """Compose the modal."""
@@ -624,8 +626,16 @@ class JobInfoModal(SpeekModal):
     # ── Analysis pane (adaptive per job state) ──────────────────────────────────
 
     def _load_analysis(self, job_id: str, details: Dict) -> None:
-        state = (details.get('JobState', '') or details.get('State', '')).split()[0].upper()
+        state_raw = details.get('JobState', '') or details.get('State', '') or ''
+        state = state_raw.split()[0].upper() if state_raw.strip() else ''
         user = getattr(self.app, 'user', '')
+
+        # If we have cached analysis from the events widget, use it directly
+        if self._cached_analysis:
+            result: Dict = {'state': state or 'UNKNOWN', 'job_id': job_id}
+            result.update(self._cached_analysis)
+            self._render_analysis(result)
+            return
 
         def _worker():
             return self._fetch_analysis(job_id, state, user, details)
@@ -667,6 +677,23 @@ class JobInfoModal(SpeekModal):
             result['timelimit'] = details.get('Timelimit', details.get('TimeLimit', ''))
             result['elapsed'] = details.get('Elapsed', details.get('RunTime', ''))
             result['mem'] = details.get('MaxRSS', details.get('ReqMem', ''))
+            # Deep OOM analysis
+            try:
+                from speek.speek_max.slurm import get_job_log_path
+                from speek.speek_max.log_scan import detect_oom, analyze_oom, classify_error
+                path = get_job_log_path(job_id)
+                if path:
+                    oom_msg = detect_oom(path)
+                    if oom_msg:
+                        result['oom_detected'] = oom_msg
+                    oom_analysis = analyze_oom(path)
+                    if oom_analysis:
+                        result['oom_analysis'] = oom_analysis
+                    err = classify_error(path)
+                    if err:
+                        result['error_analysis'] = err
+            except Exception:
+                pass
 
         elif state == 'RUNNING':
             # How is it going? Runtime, efficiency
@@ -675,15 +702,21 @@ class JobInfoModal(SpeekModal):
             result['node'] = details.get('BatchHost', details.get('NodeList', ''))
             result['cpus'] = details.get('NumCPUs', details.get('AllocCPUS', ''))
             result['mem'] = details.get('ReqMem', '')
-            # OOM scan
+            # Deep OOM analysis
             try:
                 from speek.speek_max.slurm import get_job_log_path
-                from speek.speek_max.log_scan import detect_oom
+                from speek.speek_max.log_scan import detect_oom, analyze_oom, classify_error
                 path = get_job_log_path(job_id)
                 if path:
                     oom_msg = detect_oom(path)
                     if oom_msg:
                         result['oom_detected'] = oom_msg
+                    oom_analysis = analyze_oom(path)
+                    if oom_analysis:
+                        result['oom_analysis'] = oom_analysis
+                    err = classify_error(path)
+                    if err:
+                        result['error_analysis'] = err
             except Exception:
                 pass
 
@@ -693,15 +726,21 @@ class JobInfoModal(SpeekModal):
             result['timelimit'] = details.get('Timelimit', details.get('TimeLimit', ''))
             result['exit_code'] = details.get('ExitCode', '')
             result['node'] = details.get('BatchHost', details.get('NodeList', ''))
-            # OOM scan
+            # Deep OOM analysis
             try:
                 from speek.speek_max.slurm import get_job_log_path
-                from speek.speek_max.log_scan import detect_oom
+                from speek.speek_max.log_scan import detect_oom, analyze_oom, classify_error
                 path = get_job_log_path(job_id)
                 if path:
                     oom_msg = detect_oom(path)
                     if oom_msg:
                         result['oom_detected'] = oom_msg
+                    oom_analysis = analyze_oom(path)
+                    if oom_analysis:
+                        result['oom_analysis'] = oom_analysis
+                    err = classify_error(path)
+                    if err:
+                        result['error_analysis'] = err
             except Exception:
                 pass
 
@@ -776,6 +815,99 @@ class JobInfoModal(SpeekModal):
             lines.append(f'  [{c_muted}]{eff:.1f}% effective vs {alloc:.1f}% share[/]')
         return lines
 
+    @staticmethod
+    def _render_oom_block(data: Dict, lines: list,
+                          c_error: str, c_warning: str, c_muted: str, c_success: str) -> None:
+        """Render deep OOM analysis block if available."""
+        analysis = data.get('oom_analysis')
+        if not analysis:
+            return
+        lines.append('')
+        lines.append(f'[bold {c_error}]── ☢ OOM Analysis ──[/]')
+        trigger = analysis.get('trigger', '')
+        if trigger:
+            lines.append(f'  [bold {c_error}]{trigger}[/]')
+
+        # Memory details
+        tried = analysis.get('tried_alloc')
+        already = analysis.get('already_alloc')
+        gpu_total = analysis.get('gpu_total')
+        if tried or already or gpu_total:
+            lines.append('')
+            lines.append(f'  [bold]Memory breakdown:[/]')
+            if tried:
+                lines.append(f'    [{c_warning}]Tried to allocate:[/]  [bold]{tried}[/]')
+            if already:
+                lines.append(f'    [{c_warning}]Already allocated:[/]  [bold]{already}[/]')
+            if gpu_total:
+                lines.append(f'    [{c_muted}]GPU total memory:[/]   [bold]{gpu_total}[/]')
+
+        # Batch size
+        bs = analysis.get('batch_size')
+        if bs:
+            lines.append(f'    [{c_muted}]Detected batch_size:[/] [bold]{bs}[/]')
+
+        # Stack trace
+        frames = analysis.get('stack_frames', [])
+        if frames:
+            lines.append('')
+            lines.append(f'  [bold]Your code (stack trace):[/]')
+            for f in frames:
+                lines.append(f'    [{c_warning}]{f}[/]')
+
+        # Suggestions
+        suggestions = analysis.get('suggestions', [])
+        if suggestions:
+            lines.append('')
+            lines.append(f'  [bold {c_success}]Suggestions:[/]')
+            for s in suggestions:
+                lines.append(f'    [{c_muted}]• {s}[/]')
+
+    @staticmethod
+    def _render_error_block(data: Dict, lines: list,
+                            c_error: str, c_warning: str, c_muted: str, c_success: str) -> None:
+        """Render general error analysis block if available."""
+        err = data.get('error_analysis')
+        if not err:
+            return
+        # Skip if OOM analysis already covers it
+        if data.get('oom_analysis') and err.get('error_type') == 'OOM':
+            return
+        etype = err.get('error_type', '')
+        desc = err.get('description', '')
+        _TYPE_ICONS = {
+            'OOM': '☢', 'NCCL': '🔗', 'CUDA_ERROR': '⚡', 'NAN_LOSS': '∅',
+            'SHAPE_MISMATCH': '▦', 'FILE_ERROR': '📁', 'DIST_TIMEOUT': '⏱',
+            'SEGFAULT': '💥', 'PREEMPTED': '⏏', 'IMPORT_ERROR': '📦', 'KILLED': '☠',
+        }
+        icon = _TYPE_ICONS.get(etype, '⚠')
+        lines.append('')
+        lines.append(f'[bold {c_error}]── {icon} {desc} ({etype}) ──[/]')
+        trigger = err.get('trigger', '')
+        if trigger:
+            lines.append(f'  [bold {c_error}]{trigger}[/]')
+        # Context lines
+        ctx = err.get('context_lines', [])
+        if ctx:
+            lines.append('')
+            lines.append(f'  [bold]Context:[/]')
+            for ln in ctx:
+                lines.append(f'    [{c_muted}]{ln}[/]')
+        # Stack trace
+        frames = err.get('stack_frames', [])
+        if frames:
+            lines.append('')
+            lines.append(f'  [bold]Your code:[/]')
+            for f in frames:
+                lines.append(f'    [{c_warning}]{f}[/]')
+        # Suggestions
+        suggestions = err.get('suggestions', [])
+        if suggestions:
+            lines.append('')
+            lines.append(f'  [bold {c_success}]Suggestions:[/]')
+            for s in suggestions:
+                lines.append(f'    [{c_muted}]• {s}[/]')
+
     def _render_analysis(self, data: Dict) -> None:
         from speek.speek_max._utils import tc
         tv = self.app.theme_variables
@@ -836,6 +968,9 @@ class JobInfoModal(SpeekModal):
                 lines.append(f'  [{c_muted}]Job exceeded its time limit[/]')
             elif state == 'OUT_OF_MEMORY':
                 lines.append(f'  [{c_muted}]Job exceeded memory allocation[/]')
+            # Deep OOM analysis
+            self._render_oom_block(data, lines, c_error, c_warning, c_muted, c_success)
+            self._render_error_block(data, lines, c_error, c_warning, c_muted, c_success)
             # Extract errors from log
             if self._log_content:
                 log_text = self._log_content.plain if hasattr(self._log_content, 'plain') else str(self._log_content)
@@ -851,7 +986,9 @@ class JobInfoModal(SpeekModal):
             if oom_msg:
                 lines.append(f'[bold {c_error}]── ☢ OOM Detected ──[/]')
                 lines.append(f'  [bold {c_error}]{oom_msg}[/]')
-                lines.append('')
+            self._render_oom_block(data, lines, c_error, c_warning, c_muted, c_success)
+            self._render_error_block(data, lines, c_error, c_warning, c_muted, c_success)
+            lines.append('')
             lines.append(f'[bold {c_success}]── Running Status ──[/]')
             elapsed = data.get('elapsed', '')
             timelimit = data.get('timelimit', '')
@@ -870,7 +1007,9 @@ class JobInfoModal(SpeekModal):
                 lines.append(f'[bold {c_error}]── ☢ OOM Detected ──[/]')
                 lines.append(f'  [bold {c_error}]{oom_msg}[/]')
                 lines.append(f'  [{c_warning}]Job completed but OOM errors found in log[/]')
-                lines.append('')
+            self._render_oom_block(data, lines, c_error, c_warning, c_muted, c_success)
+            self._render_error_block(data, lines, c_error, c_warning, c_muted, c_success)
+            lines.append('')
             lines.append(f'[bold {c_success}]── Completed ──[/]')
             elapsed = data.get('elapsed', '')
             timelimit = data.get('timelimit', '')

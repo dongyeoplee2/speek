@@ -5,9 +5,18 @@ import json
 import os
 import re
 from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+
+@dataclass
+class OomResult:
+    """Unified per-job OOM/error analysis result."""
+    is_oom: bool
+    reason: str = ''                # short text from detect_oom
+    analysis: Optional[dict] = None  # {oom_analysis, error_analysis, log_path}
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -23,7 +32,7 @@ from textual.widgets import (
 )
 
 from speek.speek_max.slurm import fetch_history, fetch_active_jobs_scontrol, SacctUnavailable
-from speek.speek_max._utils import tc, safe, state_sym, state_badge, STATE_SYMBOL
+from speek.speek_max._utils import tc, safe, state_sym, state_badge, STATE_SYMBOL, job_name_cell as _job_name_cell
 from speek.speek_max.widgets.datatable import SpeekDataTable
 from speek.speek_max.widgets.foldable_table import (
     FoldableTableMixin, FoldGroup, FoldMode, Leaf, Divider, Spacer,
@@ -145,21 +154,21 @@ def _date_label(date_key: str) -> str:
         weekday = dt.strftime('%a')
         short = dt.strftime('%m/%d')
         if delta == 0:
-            return f'Today  {short}'
+            return f'{short} Today'
         if delta == 1:
-            return f'Yesterday  {short}'
+            return f'{short} Yesterday'
         if delta < 7:
-            return f'{weekday}  {short}'
+            return f'{short} {weekday}'
         if delta < 30:
             weeks = delta // 7
-            return f'~{weeks}w ago  {short}'
+            return f'{short} ~{weeks}w ago'
         months = delta // 30
-        return f'~{months}m ago  {short}'
+        return f'{short} ~{months}m ago'
     except Exception:
         return date_key
 
 
-_HISTORY_COL_WIDTHS = [12, 3, 3, 2, 6, 5, 7, 7, 8]
+_HISTORY_COL_WIDTHS = [12, 14, 3, 2, 6, 5, 7, 7, 8]
 
 _N_HISTORY_COLS = 9  # Name + E + Ago + #J + #G + Part + Nodes + Elapsed + IDs
 
@@ -363,7 +372,7 @@ class FullHistoryModal(SpeekModal):
         dt = self.query_one('#fh-dt', SpeekDataTable)
         dt.zebra_stripes = True
         dt.add_column('Name',    width=22)
-        dt.add_column('E',       width=3)
+        dt.add_column('Event',   width=14)
         dt.add_column('Ago',     width=3)
         dt.add_column('#J',       width=2)
         dt.add_column('#G',      width=3)
@@ -408,7 +417,7 @@ class HistoryWidget(FoldableTableMixin, Widget):
         Binding('1',     'tab_unread',  '',         show=False),
         Binding('2',     'tab_read',    '',         show=False),
         Binding('3',     'tab_all',     '',         show=False),
-        Binding('v',     'expand_group', '▶▼',      show=True),
+        Binding('v',     'expand_group', '▶/▼',     show=True),
         Binding('V',     'fold_all',    '',         show=False),
         Binding('S',     'toggle_all_read', 'Read all', show=True),
         Binding('space', 'toggle_read', '☐/☑',     show=False),
@@ -430,13 +439,11 @@ class HistoryWidget(FoldableTableMixin, Widget):
         self._all_groups: List[dict]           = []
         self._first_to_all: Dict[str, List[str]] = {}
         self._jid_to_row: Dict[str, Tuple]     = {}
-        self._oom_jobs: set[str]              = set()  # jids with OOM in logs
+        self._oom_jobs: set[str]              = set()  # derived from _oom_results
         self._oom_notified: set[str]          = set()
         # Load cached OOM verdicts immediately for instant badges on startup
         self._load_oom_disk()
-        for jid, is_oom in self._oom_scan_cache.items():
-            if is_oom:
-                self._oom_jobs.add(jid)
+        self._oom_jobs = {jid for jid, r in self._oom_results.items() if r.is_oom}
         # fresh_jids: job_id -> monotonic timestamp when it became fresh
         self._fresh_jids: Dict[str, float]     = {}
         self._startup_wall: float              = 0.0  # wall-clock at startup
@@ -577,7 +584,7 @@ class HistoryWidget(FoldableTableMixin, Widget):
     def _setup_dt(self, dt: SpeekDataTable) -> None:
         dt.zebra_stripes = True
         dt.add_column('Name',    width=22)
-        dt.add_column('E',       width=3)
+        dt.add_column('Event',   width=14)
         dt.add_column('Ago',     width=3)
         dt.add_column('#J',       width=2)
         dt.add_column('#G',      width=3)
@@ -690,8 +697,9 @@ class HistoryWidget(FoldableTableMixin, Widget):
             # Scan for OOM in completed/running jobs
             self._scan_oom()
         if event.worker.group == 'oom-scan' and event.state == WorkerState.SUCCESS:
-            new_oom = (event.worker.result or set()) - self._oom_jobs
-            self._oom_jobs |= (event.worker.result or set())
+            results: Dict[str, OomResult] = event.worker.result or {}
+            new_oom = {jid for jid, r in results.items() if r.is_oom} - self._oom_jobs
+            self._oom_jobs |= {jid for jid, r in results.items() if r.is_oom}
             if new_oom:
                 # Mark OOM groups as unread + fresh so they surface as new events
                 import time as _t
@@ -706,7 +714,7 @@ class HistoryWidget(FoldableTableMixin, Widget):
                 self.post_message(self.OomCount(len(self._oom_jobs)))
                 self._refresh_all_tables()
 
-    _oom_scan_cache: Dict[str, bool] = {}  # in-memory session cache
+    _oom_results: Dict[str, OomResult] = {}  # unified per-job OOM/error cache
     _OOM_CACHE_FILE = Path(
         os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache')
     ) / 'speek' / 'oom_verdicts.json'
@@ -714,32 +722,38 @@ class HistoryWidget(FoldableTableMixin, Widget):
 
     @classmethod
     def _load_oom_disk(cls) -> None:
-        """Load persistent OOM verdicts from disk (once per session)."""
+        """Load persistent OOM verdicts from disk (once per session).
+
+        Supports both old format {jid: bool} and new {jid: {is_oom, reason}}.
+        """
         if cls._oom_disk_loaded:
             return
         cls._oom_disk_loaded = True
         try:
-            import json
             data = json.loads(cls._OOM_CACHE_FILE.read_text())
             if isinstance(data, dict):
-                cls._oom_scan_cache.update(data)
+                for jid, val in data.items():
+                    if isinstance(val, dict):
+                        cls._oom_results[jid] = OomResult(
+                            is_oom=val.get('is_oom', False),
+                            reason=val.get('reason', ''),
+                        )
+                    elif isinstance(val, bool):
+                        cls._oom_results[jid] = OomResult(is_oom=val)
         except Exception:
             pass
 
     @classmethod
     def _save_oom_disk(cls) -> None:
-        """Persist OOM verdicts for completed jobs to disk.
-
-        Prunes to 5000 entries max (keeping most recent job IDs).
-        """
+        """Persist OOM verdicts to disk. Prunes to 5000 entries max."""
         try:
-            import json
-            data = cls._oom_scan_cache
+            data = {jid: {'is_oom': r.is_oom, 'reason': r.reason}
+                    for jid, r in cls._oom_results.items()}
             if len(data) > 5000:
-                # Keep most recent 5000 (highest job IDs)
                 sorted_keys = sorted(data.keys(), key=lambda k: int(k) if k.isdigit() else 0)
-                data = {k: data[k] for k in sorted_keys[-5000:]}
-                cls._oom_scan_cache = data
+                keep = set(sorted_keys[-5000:])
+                data = {k: v for k, v in data.items() if k in keep}
+                cls._oom_results = {k: v for k, v in cls._oom_results.items() if k in keep}
             cls._OOM_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
             cls._OOM_CACHE_FILE.write_text(json.dumps(data))
         except Exception:
@@ -755,9 +769,7 @@ class HistoryWidget(FoldableTableMixin, Widget):
         self._load_oom_disk()
 
         # Apply cached verdicts immediately
-        for jid, is_oom in self._oom_scan_cache.items():
-            if is_oom and jid not in self._oom_jobs:
-                self._oom_jobs.add(jid)
+        self._oom_jobs = {jid for jid, r in self._oom_results.items() if r.is_oom}
 
         candidates = []
         for g in self._all_groups:
@@ -767,7 +779,7 @@ class HistoryWidget(FoldableTableMixin, Widget):
             for jid in g['ids']:
                 if jid in self._oom_jobs:
                     continue
-                if state == 'COMPLETED' and jid in self._oom_scan_cache:
+                if state == 'COMPLETED' and jid in self._oom_results:
                     continue
                 candidates.append((jid, state))
 
@@ -776,17 +788,27 @@ class HistoryWidget(FoldableTableMixin, Widget):
 
         def _worker():
             from speek.speek_max.slurm import get_job_log_path
-            from speek.speek_max.log_scan import detect_oom
-            oom_found: set[str] = set()
+            from speek.speek_max.log_scan import detect_oom, analyze_oom, classify_error
+            results: Dict[str, OomResult] = {}
             for jid, _state in candidates:
                 path = get_job_log_path(jid)
-                is_oom = bool(path and detect_oom(path))
-                self._oom_scan_cache[jid] = is_oom
+                if not path:
+                    continue
+                reason = detect_oom(path)
+                is_oom = bool(reason)
+                analysis = None
                 if is_oom:
-                    oom_found.add(jid)
-            # Persist to disk after scan
+                    oom_detail = analyze_oom(path)
+                    err_detail = classify_error(path)
+                    analysis = {'oom_analysis': oom_detail, 'error_analysis': err_detail, 'log_path': path}
+                else:
+                    err_detail = classify_error(path)
+                    if err_detail:
+                        analysis = {'error_analysis': err_detail, 'log_path': path}
+                results[jid] = OomResult(is_oom=is_oom, reason=reason or '', analysis=analysis)
+            self._oom_results.update(results)
             self._save_oom_disk()
-            return oom_found
+            return results
 
         self.run_worker(_worker, thread=True, group='oom-scan')
 
@@ -814,19 +836,21 @@ class HistoryWidget(FoldableTableMixin, Widget):
         return recent
 
     def _state_style_dict(self, tv: dict) -> dict:
-        c_muted   = tc(tv, 'text-muted',   'bright_black')
-        c_error   = tc(tv, 'text-error',   'red')
-        c_success = tc(tv, 'text-success', 'green')
-        c_warning = tc(tv, 'text-warning', 'yellow')
-        return {
-            'COMPLETED':     'bold #4A9FD9',
-            'FAILED':        f'bold {c_error}',
-            'TIMEOUT':       f'bold {c_error}',
-            'CANCELLED':     f'bold {c_muted}',
-            'OUT_OF_MEMORY': f'bold {c_error}',
-            'RUNNING':       f'bold {c_success}',
-            'PENDING':       f'bold {c_warning}',
+        # Brighter versions of STATE_BG for readable text labels
+        _STATE_TEXT_COLOR = {
+            'RUNNING':       '#4aca4a',
+            'PENDING':       '#c8b830',
+            'COMPLETED':     '#5aacde',
+            'FAILED':        '#d05050',
+            'TIMEOUT':       '#c88a30',
+            'CANCELLED':     '#808080',
+            'OUT_OF_MEMORY': '#c050a0',
+            'NODE_FAIL':     '#c04040',
+            'PREEMPTED':     '#a0a040',
+            'SUSPENDED':     '#7070c0',
+            'REQUEUED':      '#50b0b0',
         }
+        return {state: f'bold {c}' for state, c in _STATE_TEXT_COLOR.items()}
 
     # ── Tree building ────────────────────────────────────────────────────────
 
@@ -857,7 +881,7 @@ class HistoryWidget(FoldableTableMixin, Widget):
                     Leaf(
                         key=f'{_IND_KEY_PREFIX}{jid}',
                         data={'jid': jid, 'group': g},
-                        indent=5,
+                        indent=4,
                     )
                     for jid in g['ids']
                 ]
@@ -867,13 +891,13 @@ class HistoryWidget(FoldableTableMixin, Widget):
                     data={'group': g},
                     children=ind_children,
                     mode=FoldMode.EXPANDED_SET,
-                    indent=3,
+                    indent=2,
                 ))
             else:
                 tree.append(Leaf(
                     key=g['first_jid'],
                     data={'group': g},
-                    indent=3,
+                    indent=2,
                 ))
         return tree
 
@@ -974,7 +998,7 @@ class HistoryWidget(FoldableTableMixin, Widget):
         else:
             fold = ''
         count_str     = str(n)
-        disp_name     = f'   {fold} {g["disp_name"]}' if fold else f'     {g["disp_name"]}'
+        disp_name     = f'  {fold} {g["disp_name"]}' if fold else f'    {g["disp_name"]}'
         elapsed_style = (f'bold {state_style.get(g["state"], c_muted)}'
                          if g['state'] in _TERMINAL else c_muted)
         gpu_label = _fmt_gpu(g['gpu_models']) or g['part']
@@ -987,9 +1011,25 @@ class HistoryWidget(FoldableTableMixin, Widget):
 
         gpu_total = g.get('gpu_count', 0)
         gpu_count_str = str(gpu_total) if gpu_total else ''
+        state_text = g['state'].replace('_', ' ').title()
+        if has_oom:
+            # Find the OOM reason from any job in the group
+            oom_reason = ''
+            for jid in g['ids']:
+                r = self._oom_results.get(jid)
+                oom_reason = r.reason if r else ''
+                if oom_reason:
+                    break
+            state_text = f'OOM: {oom_reason[:20]}' if oom_reason else 'OOM'
+        state_color = state_style.get(g['state'], c_muted)
+        if has_oom:
+            state_color = state_style.get('OUT_OF_MEMORY', c_muted)
+        event_cell = Text()
+        event_cell.append_text(badge)
+        event_cell.append(f' {state_text}', style=state_color)
         return (
             _cell(disp_name,              _COL_WIDTHS['name'],    name_style),
-            badge,
+            event_cell,
             _cell(_rel_time(g['start'], _time_mode),  _COL_WIDTHS['ago'],     c_secondary),
             _cell(count_str,              _COL_WIDTHS['count'],   f'bold {c_muted}'),
             Text(gpu_count_str, style=f'bold {c_muted}'),
@@ -1012,9 +1052,14 @@ class HistoryWidget(FoldableTableMixin, Widget):
         state_base = state.split()[0] if state else ''
         branch = '└' if is_last else '├'
         ind_gpu = _parse_gpu_count(alloc_tres)
+        state_text = state_base.replace('_', ' ').title() if state_base else ''
+        ind_badge = _type_badge(state_base, tv)
+        event_cell = Text()
+        event_cell.append_text(ind_badge)
+        event_cell.append(f' {state_text}', style=c_muted)
         return (
-            Text(f'   {branch}── {name}', style=c_muted),
-            _type_badge(state_base, tv),
+            _job_name_cell(f'  {branch}── ', name, jid, c_muted),
+            event_cell,
             Text(_rel_time(start, time_mode), style=c_secondary),
             Text('',                        style=c_muted),
             Text(str(ind_gpu) if ind_gpu else '', style=c_muted),
@@ -1187,6 +1232,10 @@ class HistoryWidget(FoldableTableMixin, Widget):
         sacct_ok = (getattr(self.app, '_cmd_sacct', True)
                     and getattr(self.app, '_feat_sacct_details', True))
 
+        # Get cached analysis if available
+        _r = self._oom_results.get(fid)
+        cached = _r.analysis if _r else None
+
         def _fetch_and_show() -> None:
             from speek.speek_max.slurm import fetch_job_details_and_log_path
             from speek.speek_max.log_scan import scan_log_incremental
@@ -1195,7 +1244,8 @@ class HistoryWidget(FoldableTableMixin, Widget):
             from speek.speek_max.widgets.job_info_modal import JobInfoModal
             self.app.call_from_thread(
                 lambda: self.app.push_screen(
-                    JobInfoModal(fid, path, content, details, job_ids, current_idx)
+                    JobInfoModal(fid, path, content, details, job_ids, current_idx,
+                                cached_analysis=cached)
                 )
             )
 

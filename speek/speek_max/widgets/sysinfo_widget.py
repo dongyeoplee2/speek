@@ -136,7 +136,7 @@ class SysInfoWidget(Widget):
     """
 
     _SI_SECTIONS = ['cluster', 'gpu', 'commands', 'datasources', 'sacct',
-                     'missing', 'priority', 'myshare', 'cache']
+                     'missing', 'priority', 'myshare', 'errordetect', 'cache']
 
     def compose(self) -> ComposeResult:
         with VerticalScroll():
@@ -325,6 +325,9 @@ class SysInfoWidget(Widget):
         # ── My Scheduling State ───────────────────────────────────────────
         self._render_myshare_section(tv)
 
+        # ── Error Detection Rules ─────────────────────────────────────────
+        self._render_error_detect_section()
+
         # ── Cache info ─────────────────────────────────────────────────────
         self._render_cache_info()
 
@@ -463,6 +466,36 @@ class SysInfoWidget(Widget):
 
         try:
             self.query_one('#si-myshare', Static).update(table)
+        except Exception:
+            pass
+
+    def _render_error_detect_section(self) -> None:
+        """Render the Error Detection Rules table."""
+        self.query_one('#si-header-errordetect', Label).update('── Error Detection Rules ──')
+        from speek.speek_max.log_scan import _ERROR_PATTERNS
+
+        table = RichTable(show_header=True, show_edge=False, box=None,
+                          pad_edge=False, padding=(0, 1, 0, 0))
+        table.add_column('Type', style='bold', no_wrap=True, min_width=14)
+        table.add_column('Description', min_width=24)
+        table.add_column('Suggestions', style='dim')
+
+        _ICONS = {
+            'OOM': '☢', 'NCCL': '🔗', 'CUDA_ERROR': '⚡', 'NAN_LOSS': '∅',
+            'SHAPE_MISMATCH': '▦', 'FILE_ERROR': '📁', 'DIST_TIMEOUT': '⏱',
+            'SEGFAULT': '💥', 'PREEMPTED': '⏏', 'IMPORT_ERROR': '📦', 'KILLED': '☠',
+        }
+
+        for _, etype, desc, suggestions in _ERROR_PATTERNS:
+            icon = _ICONS.get(etype, '⚠')
+            table.add_row(
+                f'{icon} {etype}',
+                desc,
+                suggestions[0] if suggestions else '',
+            )
+
+        try:
+            self.query_one('#si-errordetect', Static).update(table)
         except Exception:
             pass
 

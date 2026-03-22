@@ -38,6 +38,24 @@ def state_badge(state: str) -> 'Text':
     bg = STATE_BG.get(base, '#4a4a4a')
     return Text(f' {sym} ', style=f'bold white on {bg}')
 
+def job_name_cell(prefix: str, name: str, jid: str, c_muted: str,
+                  single: bool = False) -> 'Text':
+    """Render a job leaf name cell.
+
+    single=True  → '{name} {jid}' with jid dimmed
+    single=False → just '{jid}'
+    """
+    from rich.text import Text
+    t = Text()
+    t.append(prefix, style=c_muted)
+    if single:
+        t.append(name, style='')
+        t.append(f' {jid}', style='dim')
+    else:
+        t.append(jid, style=c_muted)
+    return t
+
+
 _RICH_TO_TEXTUAL = {
     'black': 'ansi_black', 'red': 'ansi_red', 'green': 'ansi_green',
     'yellow': 'ansi_yellow', 'blue': 'ansi_blue', 'magenta': 'ansi_magenta',

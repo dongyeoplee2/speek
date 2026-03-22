@@ -20,7 +20,7 @@ from speek.speek_max.slurm import (
     fetch_all_priorities, fetch_history, fetch_active_jobs_scontrol,
     fetch_my_jobs, get_job_log_path,
 )
-from speek.speek_max._utils import fmt_time, tc, safe, state_sym, state_badge
+from speek.speek_max._utils import fmt_time, tc, safe, state_sym, state_badge, job_name_cell as _job_name_cell
 from speek.speek_max.widgets.datatable import SpeekDataTable
 from speek.speek_max.widgets.foldable_table import (
     FoldableTableMixin, FoldGroup, FoldMode, Leaf, Divider, Spacer,
@@ -82,6 +82,71 @@ def _should_merge(a: dict, b: dict) -> bool:
     return bool(na and na == nb)
 
 
+def _parse_eta_secs(eta: str) -> int:
+    """Parse ETA string like '~14h 30m' or '~3m' back to seconds."""
+    import re
+    s = eta.lstrip('~')
+    h = m = 0
+    mh = re.search(r'(\d+)h', s)
+    mm = re.search(r'(\d+)m', s)
+    if mh:
+        h = int(mh.group(1))
+    if mm:
+        m = int(mm.group(1))
+    return h * 3600 + m * 60
+
+
+def _eta_range(etas: List[str]) -> str:
+    """Return min~max ETA range string, properly sorted by duration."""
+    if not etas:
+        return ''
+    parsed = [(e, _parse_eta_secs(e)) for e in etas]
+    parsed.sort(key=lambda x: x[1])
+    lo = parsed[0][0].lstrip('~')
+    hi = parsed[-1][0].lstrip('~')
+    if lo == hi or len(parsed) == 1:
+        return lo
+    return f'{lo}~{hi}'
+
+
+def _compact_ids(jids: List[str]) -> str:
+    """Compact job IDs into ranges: [12345,12346,12347,12350] → '12345-47,12350'."""
+    if not jids:
+        return ''
+    nums: List[int] = []
+    for j in jids:
+        try:
+            nums.append(int(j.split('_')[0]))
+        except ValueError:
+            return ','.join(jids[:5]) + (f'+{len(jids)-5}' if len(jids) > 5 else '')
+    nums.sort()
+    ranges: List[str] = []
+    start = prev = nums[0]
+    for n in nums[1:]:
+        if n == prev + 1:
+            prev = n
+        else:
+            ranges.append(_fmt_range(start, prev))
+            start = prev = n
+    ranges.append(_fmt_range(start, prev))
+    return ','.join(ranges)
+
+
+def _fmt_range(start: int, end: int) -> str:
+    if start == end:
+        return str(start)
+    # Abbreviate: 12345-12347 → 12345-47
+    s, e = str(start), str(end)
+    common = 0
+    for a, b in zip(s, e):
+        if a == b:
+            common += 1
+        else:
+            break
+    suffix = e[common:] if common > 0 else e
+    return f'{s}-{suffix}'
+
+
 def _aggregate_within(items: List[dict]) -> List[dict]:
     """Merge similar jobs within a project into groups."""
     groups: List[dict] = []
@@ -98,10 +163,14 @@ def _aggregate_within(items: List[dict]) -> List[dict]:
 def _aggregate_by_project(rows: List[Tuple]) -> Dict[str, List[dict]]:
     """Group rows by project name (name_base), preserving order."""
     projects: Dict[str, List[dict]] = OrderedDict()
-    for jid, name, part, gpus, state, elapsed, eta, start in rows:
+    for row in rows:
+        jid, name, part, gpus, state, elapsed, eta, start = row[:8]
+        submit = row[8] if len(row) > 8 else ''
+        gpu_model = row[9] if len(row) > 9 else ''
         proj = _project_name(name)
         item = {'jid': jid, 'name': name, 'part': part, 'gpu': gpus,
-                'state': state, 'elapsed': elapsed, 'eta': eta, 'start': start}
+                'state': state, 'elapsed': elapsed, 'eta': eta, 'start': start,
+                'submit': submit, 'gpu_model': gpu_model}
         projects.setdefault(proj, []).append(item)
     return projects
 
@@ -155,7 +224,7 @@ class MyJobsWidget(FoldableTableMixin, Widget):
     BINDINGS = [
         Binding('d',     'view_job',    'Details',  show=True),
         Binding('enter', 'view_job',   'Details',  show=False),
-        Binding('v',     'toggle_fold', '▶▼',       show=True),
+        Binding('v',     'toggle_fold', '▶/▼',      show=True),
         Binding('V',     'fold_all',   '',         show=False),
         Binding('x',     'cancel_job', 'Cancel',   show=True),
         Binding('1',     'tab_current', '',        show=False),
@@ -217,15 +286,12 @@ class MyJobsWidget(FoldableTableMixin, Widget):
         dt.add_column('Name',      width=22)
         dt.add_column('#J',         width=2)
         dt.add_column('#G',       width=3)
-        dt.add_column('Part',      width=5)
-        dt.add_column('State',     width=3)
+        dt.add_column('State',     width=5)
         dt.add_column('Elapsed',   width=7)
-        dt.add_column('Ago',       width=5)
         dt.add_column('ETA',       width=5)
-        dt.add_column('Rank',      width=4)
         dt.add_column('IDs',       width=14)
-        self._log_col = dt.add_column('Log', width=16)
-        self._current_ctx = self._init_ctx(renderer=self._render_current_cell, n_cols=11, name_col_width=22)
+        self._log_col = dt.add_column('Log', width=32)
+        self._current_ctx = self._init_ctx(renderer=self._render_current_cell, n_cols=8, name_col_width=22)
         self._current_tree: List[TreeNode] = []
 
         # History tab context + tree
@@ -406,52 +472,122 @@ class MyJobsWidget(FoldableTableMixin, Widget):
         }
         tree: List[TreeNode] = []
         new_first_jids: List[str] = []
+        shared = {
+            'priorities': priorities, 'part_ranked': part_ranked,
+            'part_rank_index': part_rank_index,
+            'state_style': state_style, 'colors': colors,
+        }
 
         for proj, items in projects.items():
-            # Store job data for individual rows
             for item in items:
                 self._job_data[item['jid']] = item
 
-            agg_groups = _aggregate_within(items)
-            children: List[TreeNode] = []
-            for g in agg_groups:
-                first_jid = g['ids'][0]
-                self._group_ids[first_jid] = g['ids']
-                new_first_jids.append(first_jid)
-                count = len(g['ids'])
-                if count > 1:
-                    ind_children = [
-                        Leaf(key=f'ind::{jid}', data={'jid': jid, 'group': g, 'state_style': state_style, 'colors': colors}, indent=7)
-                        for jid in g['ids']
-                    ]
-                    children.append(FoldGroup(
-                        key=first_jid,
-                        fold_key=first_jid,
-                        data={
-                            'group': g, 'priorities': priorities,
-                            'part_ranked': part_ranked, 'part_rank_index': part_rank_index,
-                            'state_style': state_style, 'colors': colors,
-                        },
-                        children=ind_children,
-                        mode=FoldMode.EXPANDED_SET,
-                        indent=3,
-                    ))
+            # Group by submit datetime → individual jobs
+            from collections import OrderedDict as _OD
+            by_submit: Dict[str, List[dict]] = _OD()
+            for item in items:
+                raw = item.get('submit', '')
+                # Format: strip year, e.g. "2026-03-22T14:30:00" → "03-22 14:30"
+                if raw and raw not in ('N/A', 'Unknown') and len(raw) >= 16:
+                    submit_label = raw[5:16].replace('T', ' ').replace('-', '/')
+                elif raw and 'T' in raw:
+                    submit_label = raw.split('T')[0]
                 else:
-                    children.append(Leaf(
-                        key=first_jid,
-                        data={
-                            'group': g, 'priorities': priorities,
-                            'part_ranked': part_ranked, 'part_rank_index': part_rank_index,
-                            'state_style': state_style, 'colors': colors,
-                        },
-                        indent=3,
+                    submit_label = 'unknown'
+                by_submit.setdefault(submit_label, []).append(item)
+
+            submit_children: List[TreeNode] = []
+            for submit_label, sub_items in by_submit.items():
+                # Sort: running first, then pending
+                sub_items.sort(key=lambda it: (0 if it['state'] == 'RUNNING' else 1))
+
+                # Group by GPU model, then by state under each GPU
+                by_gpu: Dict[str, List[dict]] = _OD()
+                for item in sub_items:
+                    gm = item.get('gpu_model', '') or item.get('part', '')
+                    by_gpu.setdefault(gm, []).append(item)
+
+                gpu_children: List[TreeNode] = []
+                for gpu_label, gpu_items in by_gpu.items():
+                    # Track all jids under this GPU group
+                    all_jids = [it['jid'] for it in gpu_items]
+                    first_jid = all_jids[0]
+                    self._group_ids[first_jid] = all_jids
+                    new_first_jids.append(first_jid)
+
+                    # State-level folds under GPU (grouped by state, name = job IDs)
+                    by_state: Dict[str, List[dict]] = _OD()
+                    for it in gpu_items:
+                        by_state.setdefault(it['state'], []).append(it)
+
+                    is_mixed = len(by_state) > 1
+                    if is_mixed:
+                        # Mixed states: state-level folds under GPU
+                        gpu_sub: List[TreeNode] = []
+                        for st, st_items in by_state.items():
+                            st_jids = [it['jid'] for it in st_items]
+                            st_first = st_jids[0]
+                            ids_label = _compact_ids(st_jids)
+                            self._group_ids[st_first] = st_jids
+                            job_leaves: List[TreeNode] = []
+                            for item in st_items:
+                                job_leaves.append(Leaf(
+                                    key=f'ind::{item["jid"]}',
+                                    data={'jid': item['jid'], 'group': item, **shared},
+                                    indent=8,
+                                ))
+                            gpu_sub.append(FoldGroup(
+                                key=f'st::{proj}::{submit_label}::{gpu_label}::{st}',
+                                fold_key=f'{proj}::{submit_label}::{gpu_label}::{st}',
+                                data={'state_label': st, 'ids_label': ids_label,
+                                      'items': st_items, 'colors': colors, **shared},
+                                children=job_leaves,
+                                mode=FoldMode.EXPANDED_SET,
+                                indent=6,
+                            ))
+                    else:
+                        # Single state: job leaves directly under GPU
+                        gpu_sub = []
+                        for item in gpu_items:
+                            jid = item['jid']
+                            self._group_ids[jid] = [jid]
+                            gpu_sub.append(Leaf(
+                                key=f'ind::{jid}',
+                                data={'jid': jid, 'group': item, **shared},
+                                indent=6,
+                            ))
+
+                    # Mixed: default open (show state groups); single: default closed
+                    gpu_mode = FoldMode.COLLAPSED_SET if is_mixed else FoldMode.EXPANDED_SET
+                    gpu_children.append(FoldGroup(
+                        key=f'gpu::{proj}::{submit_label}::{gpu_label}',
+                        fold_key=f'{proj}::{submit_label}::{gpu_label}',
+                        data={'gpu_label': gpu_label, 'items': gpu_items,
+                              'colors': colors, **shared},
+                        children=gpu_sub,
+                        mode=gpu_mode,
+                        indent=4,
+                    ))
+
+                if len(gpu_children) == 1 and isinstance(gpu_children[0], Leaf):
+                    gpu_children[0].indent = 2
+                    submit_children.append(gpu_children[0])
+                else:
+                    submit_children.append(FoldGroup(
+                        key=f'submit::{proj}::{submit_label}',
+                        fold_key=f'{proj}::{submit_label}',
+                        data={'submit_label': submit_label, 'items': sub_items,
+                              'colors': colors, **shared},
+                        children=gpu_children,
+                        mode=FoldMode.COLLAPSED_SET,
+                        indent=2,
                     ))
 
             tree.append(FoldGroup(
                 key=f'{_PROJ}{proj}',
                 fold_key=proj,
                 data={'proj': proj, 'items': items, 'colors': colors},
-                children=children,
+                children=submit_children,
                 mode=FoldMode.COLLAPSED_SET,
                 indent=0,
             ))
@@ -460,20 +596,25 @@ class MyJobsWidget(FoldableTableMixin, Widget):
         return tree
 
     def _render_current_cell(self, node: TreeNode, is_collapsed: bool, n_cols: int) -> List[Text]:
-        """Render a Current tab tree node."""
-        if isinstance(node, FoldGroup) and node.mode == FoldMode.COLLAPSED_SET:
-            # Project header
-            return self._render_project_header(node, is_collapsed)
+        """Render a Current tab tree node.
 
-        if isinstance(node, FoldGroup) and node.mode == FoldMode.EXPANDED_SET:
-            # Job group header (with fold icon)
-            return self._render_job_group(node, is_collapsed, with_fold=True)
+        Tree hierarchy: Project (COLLAPSED_SET)
+          → Submit datetime (COLLAPSED_SET, has submit_label)
+            → GPU model (EXPANDED_SET, has gpu_label)
+              → State group (Leaf, has state_label + ids_label)
+        """
+        if isinstance(node, FoldGroup):
+            if 'proj' in node.data:
+                return self._render_project_header(node, is_collapsed)
+            if 'submit_label' in node.data:
+                return self._render_submit_header(node, is_collapsed)
+            if 'gpu_label' in node.data:
+                return self._render_gpu_header(node, is_collapsed)
+            if 'state_label' in node.data:
+                return self._render_state_header(node, is_collapsed)
 
         if isinstance(node, Leaf):
-            if node.indent == 7:
-                return self._render_individual_job(node)
-            elif node.indent == 3:
-                return self._render_job_group_leaf(node)
+            return self._render_individual_job(node)
 
         return [Text('') for _ in range(n_cols)]
 
@@ -481,43 +622,134 @@ class MyJobsWidget(FoldableTableMixin, Widget):
         d = node.data
         proj = d['proj']
         items = d['items']
-        c_muted, c_secondary, c_success, c_warning, c_error = d['colors']
+        icon = '▶' if is_collapsed else '▼'
+        return self._aggregate_cells(f'{icon} {proj}', items, d['colors'],
+                                      indent_style='bold', show_state=is_collapsed)
 
-        total = sum(len(it.get('ids', [it])) for it in items)
-        n_run  = sum(1 for it in items if it['state'] == 'RUNNING')
-        n_pend = sum(1 for it in items if it['state'] == 'PENDING')
-        n_gpu  = sum(int(it['gpu']) * len(it.get('ids', [it])) for it in items if it.get('gpu', '').isdigit())
+    def _render_submit_header(self, node: FoldGroup, is_collapsed: bool) -> List[Text]:
+        """Render submit-datetime fold header with aggregates."""
+        d = node.data
+        label = d['submit_label']
+        icon = '▶' if is_collapsed else '▼'
+        items = d.get('items', [])
+        return self._aggregate_cells(f'  {icon} {label}', items, d['colors'],
+                                      indent_style='bold', show_state=is_collapsed)
+
+    def _render_gpu_header(self, node: FoldGroup, is_collapsed: bool) -> List[Text]:
+        """Render GPU model fold header. Hide state when unfolded (children show it)."""
+        d = node.data
+        label = d['gpu_label']
+        icon = '▶' if is_collapsed else '▼'
+        items = d.get('items', [])
+        c_secondary = d['colors'][1]
+        return self._aggregate_cells(f'    {icon} {label}', items, d['colors'],
+                                      indent_style=c_secondary, show_state=is_collapsed)
+
+    def _render_state_header(self, node: FoldGroup, is_collapsed: bool) -> List[Text]:
+        """Render a state-group fold: shows job IDs as name, single state badge."""
+        d = node.data
+        colors = d['colors']
+        c_muted, c_secondary, _, _, _ = colors
+        items = d.get('items', [])
+        ids_label = d.get('ids_label', '')
+        n_jobs = len(items)
+        n_gpu = sum(int(it.get('gpu', 0)) for it in items if str(it.get('gpu', '')).isdigit())
+        state = d['state_label']
+        badge = state_badge(state)
         max_secs = max((self._parse_elapsed(it.get('elapsed', '')) for it in items), default=0)
         elapsed_str = self._fmt_elapsed(max_secs)
-        state_t = Text()
-        if n_run:
-            state_t.append(str(n_run), style=f'bold {c_success}')
-            state_t.append('R ', style=c_muted)
-        if n_pend:
-            state_t.append(str(n_pend), style=f'bold {c_warning}')
-            state_t.append('P', style=c_muted)
-        # Earliest start across all items in the project
-        earliest_start = ''
-        for it in items:
-            s = it.get('start', '')
-            if s and s not in ('N/A', 'Unknown') and (not earliest_start or s < earliest_start):
-                earliest_start = s
-        ago_str = fmt_time(earliest_start) if earliest_start else '—'
-
         icon = '▶' if is_collapsed else '▼'
+        etas = [it.get('eta', '') for it in items if it.get('eta')]
+        eta_str = _eta_range(etas)
+        c_warning = colors[3]
         return [
-            Text(f'{icon} {proj}', style='bold'),
-            Text(str(total), style=f'bold {c_secondary}'),
+            Text(f'      {icon} {ids_label}', style='default'),
+            Text(str(n_jobs), style='bold'),
             Text(str(n_gpu) if n_gpu else '', style=f'bold {c_secondary}'),
-            Text(' '),
-            state_t,
+            badge,
             Text(elapsed_str, style=c_muted),
-            Text(ago_str, style=c_muted),
-            Text(' '),
-            Text(' '),
-            Text(' '),
-            Text('', style=c_muted),
+            Text(eta_str, style=f'{c_warning} italic') if eta_str else Text(''),
+            Text(ids_label, style=c_muted),
+            Text(''),  # Log
         ]
+
+    @staticmethod
+    def _iter_leaves(node: FoldGroup):
+        """Yield all leaf descendants."""
+        for child in node.children:
+            if isinstance(child, FoldGroup):
+                yield from MyJobsWidget._iter_leaves(child)
+            elif isinstance(child, Leaf):
+                yield child
+
+    def _aggregate_cells(self, label: str, items: List[dict], colors: tuple,
+                         indent_style: str = 'bold',
+                         show_state: bool = True) -> List[Text]:
+        """Build a full 10-column row with aggregated data from items.
+
+        Columns: Name, #J, #G, State(badge), Elapsed, Ago, ETA, Rank, IDs, Log
+        """
+        c_muted, c_secondary, c_success, c_warning, _ = colors
+        n_jobs = len(items)
+        from speek.speek_max._utils import STATE_SYMBOL, STATE_BG
+        n_run = sum(1 for it in items if it.get('state') == 'RUNNING')
+        n_pend = sum(1 for it in items if it.get('state') == 'PENDING')
+        n_gpu = sum(int(it.get('gpu', 0)) for it in items if str(it.get('gpu', '')).isdigit())
+        gpu_cell = Text(str(n_gpu) if n_gpu else '', style=f'bold {c_secondary}')
+        # State badge: only shown when folded (show_state=True)
+        if not show_state:
+            badge = Text('')
+        elif n_run and n_pend:
+            badge = Text()
+            badge.append(f'{STATE_SYMBOL["RUNNING"]}{n_run}', style=f'bold {c_success}')
+            badge.append(' ')
+            badge.append(f'{STATE_SYMBOL["PENDING"]}{n_pend}', style=f'bold {c_warning}')
+        elif n_run:
+            badge = state_badge('RUNNING')
+        elif n_pend:
+            badge = state_badge('PENDING')
+        else:
+            states = [it.get('state', '') for it in items]
+            badge = state_badge(states[0]) if states else Text('')
+        # Max elapsed
+        max_secs = max((self._parse_elapsed(it.get('elapsed', '')) for it in items), default=0)
+        elapsed_str = self._fmt_elapsed(max_secs)
+        # ETA: min~max range from pending items
+        etas = [it.get('eta', '') for it in items if it.get('eta')]
+        eta_str = _eta_range(etas)
+        # IDs
+        jids = [it.get('jid', '') for it in items if it.get('jid')]
+        ids_str = jids[0] if len(jids) == 1 else f'{jids[0]}+{len(jids)-1}' if jids else ''
+        return [
+            Text(label, style=indent_style),
+            Text(str(n_jobs), style=f'bold {c_muted}'),
+            gpu_cell,
+            badge,
+            Text(elapsed_str, style=c_muted),
+            Text(eta_str, style=f'{c_warning} italic') if eta_str else Text(''),
+            Text(ids_str, style=c_muted),
+            Text(''),  # Log
+        ]
+
+    def _collect_items(self, node: FoldGroup) -> List[dict]:
+        """Collect job item dicts from all leaf descendants."""
+        items = []
+        for leaf in self._iter_leaves(node):
+            jid = leaf.data.get('jid', '') if leaf.data else ''
+            it = self._job_data.get(jid)
+            if it:
+                items.append(it)
+        return items
+
+    def _render_part_header(self, node: FoldGroup, is_collapsed: bool) -> List[Text]:
+        """Render partition fold header with aggregates."""
+        d = node.data
+        colors = d['colors']
+        c_secondary = colors[1]
+        part = d['part_label']
+        icon = '▶' if is_collapsed else '▼'
+        items = self._collect_items(node)
+        return self._aggregate_cells(f'      {icon} {part}', items, colors, indent_style=c_secondary)
 
     def _render_job_group(self, node: FoldGroup, is_collapsed: bool, with_fold: bool = True) -> List[Text]:
         d = node.data
@@ -547,8 +779,11 @@ class MyJobsWidget(FoldableTableMixin, Widget):
             total_gpu = 0
         g_start = g.get('start', '')
         g_ago = fmt_time(g_start) if g_start and g_start not in ('N/A', 'Unknown') else '—'
+        # Show submit time as sub-group label
+        g_submit = g.get('submit', '')
+        start_label = g_submit[:16] if g_submit and g_submit not in ('N/A', 'Unknown') else g['name']
         return [
-            Text(f'  {fold_icon}{g["name"]}', style='default'),
+            Text(f'  {fold_icon}{start_label}', style='default'),
             Text(str(count), style=f'bold {c_muted}'),
             Text(str(total_gpu) if total_gpu else g['gpu'], style='bold'),
             Text(g['part'], style=c_secondary),
@@ -601,27 +836,27 @@ class MyJobsWidget(FoldableTableMixin, Widget):
         d = node.data
         jid = d['jid']
         g = d['group']
-        state_style = d['state_style']
         colors = d['colors']
-        c_muted, c_secondary, _, c_warning, _ = colors
+        c_muted, c_secondary, _, c_warning, c_error = colors
 
         it = self._job_data.get(jid, g)
         state = it.get('state', g['state'])
         eta = it.get('eta', '')
-        it_start = it.get('start', '')
-        it_ago = fmt_time(it_start) if it_start and it_start not in ('N/A', 'Unknown') else '—'
+        has_oom = jid in self._oom_jobs
+        badge = state_badge('OUT_OF_MEMORY') if has_oom else state_badge(state)
+        hint = self._log_hints.get(jid, '')
+        hint_style = f'bold {c_error}' if has_oom else c_muted
+        indent = ' ' * max(0, node.indent - 2)
+        branch = '└' if node.is_last else '├'
         return [
-            Text(f'  {"└" if node.is_last else "├"}── {jid}', style=c_muted),
-            Text('', style=c_muted),
+            _job_name_cell(f'{indent}{branch}── ', it.get('name', jid), jid, c_muted, single=(node.indent <= 4)),
+            Text('1', style=f'bold {c_muted}'),
             Text(it.get('gpu', g['gpu']), style='bold'),
-            Text(it.get('part', g['part']), style=c_secondary),
-            state_badge(state),
+            badge,
             Text(it.get('elapsed', g['elapsed']), style=c_muted),
-            Text(it_ago, style=c_muted),
             Text(eta, style=f'{c_warning} italic') if eta else Text(''),
-            Text('', style=c_muted),
             Text(jid, style=c_muted),
-            Text('', style=c_muted),
+            Text(hint[:40] if hint else '', style=hint_style),
         ]
 
     # ── History tab: tree building ────────────────────────────────────────────
@@ -718,7 +953,6 @@ class MyJobsWidget(FoldableTableMixin, Widget):
 
             n = len(items)
             if n > 1:
-                # Project FoldGroup (COLLAPSED_SET)
                 # Sub-group similar jobs within the project
                 sub_groups: list[list] = []
                 for item in items:
@@ -733,30 +967,37 @@ class MyJobsWidget(FoldableTableMixin, Widget):
                     if not merged:
                         sub_groups.append([item])
 
-                proj_children: List[TreeNode] = []
-                for sg in sub_groups:
-                    sg_n = len(sg)
-                    first = sg[0]
-                    if sg_n > 1:
-                        sg_key = f'hgrp_{first["jid"]}'
-                        ind_children = [
-                            Leaf(key=f'hist_{item["jid"]}', data=item, indent=7)
-                            for item in sg
-                        ]
-                        proj_children.append(FoldGroup(
-                            key=sg_key,
-                            fold_key=sg_key,
-                            data={'items': sg, 'first': first},
-                            children=ind_children,
-                            mode=FoldMode.COLLAPSED_SET,
-                            indent=5,
-                        ))
-                    else:
-                        proj_children.append(Leaf(
-                            key=f'hist_{first["jid"]}',
-                            data=first,
-                            indent=5,
-                        ))
+                # If only one sub-group, skip the sub-group fold (redundant)
+                if len(sub_groups) == 1:
+                    proj_children = [
+                        Leaf(key=f'hist_{item["jid"]}', data=item, indent=4)
+                        for item in sub_groups[0]
+                    ]
+                else:
+                    proj_children: List[TreeNode] = []
+                    for sg in sub_groups:
+                        sg_n = len(sg)
+                        first = sg[0]
+                        if sg_n > 1:
+                            sg_key = f'hgrp_{first["jid"]}'
+                            ind_children = [
+                                Leaf(key=f'hist_{item["jid"]}', data=item, indent=6)
+                                for item in sg
+                            ]
+                            proj_children.append(FoldGroup(
+                                key=sg_key,
+                                fold_key=sg_key,
+                                data={'items': sg, 'first': first},
+                                children=ind_children,
+                                mode=FoldMode.COLLAPSED_SET,
+                                indent=4,
+                            ))
+                        else:
+                            proj_children.append(Leaf(
+                                key=f'hist_{first["jid"]}',
+                                data=first,
+                                indent=4,
+                            ))
 
                 tree.append(FoldGroup(
                     key=f'hproj::{proj}',
@@ -764,15 +1005,15 @@ class MyJobsWidget(FoldableTableMixin, Widget):
                     data={'proj': proj, 'items': items},
                     children=proj_children,
                     mode=FoldMode.COLLAPSED_SET,
-                    indent=3,
+                    indent=2,
                 ))
             else:
-                # Single-item project — just a leaf under the divider
+                # Single-item project — just a leaf under the divider (show name)
                 first = items[0]
                 tree.append(Leaf(
                     key=f'hist_{first["jid"]}',
                     data=first,
-                    indent=5,
+                    indent=2,
                 ))
 
         return tree
@@ -804,13 +1045,14 @@ class MyJobsWidget(FoldableTableMixin, Widget):
 
         if isinstance(node, Leaf):
             item = node.data
-            ss = state_style.get(item['state'].split()[0], c_muted)
             h_start = item.get('start', '')
             h_ago = fmt_time(h_start) if h_start and h_start not in ('N/A', 'Unknown') else '—'
-            if node.indent == 7:
-                # Individual job under sub-group
+            indent = ' ' * max(0, node.indent - 2)
+            if node.indent >= 4:
+                # Job under a group — show job ID (or name+id if single)
+                branch = '└' if node.is_last else '├'
                 return [
-                    Text(f'     {"└" if node.is_last else "├"}── {item["name"]}', style=c_muted),
+                    _job_name_cell(f'{indent}{branch}── ', item['name'], item['jid'], c_muted, single=False),
                     Text('', style=c_muted),
                     Text(item['gpu'], style=c_muted),
                     Text(item['part'], style=c_muted),
@@ -820,9 +1062,9 @@ class MyJobsWidget(FoldableTableMixin, Widget):
                     Text(item['jid'], style=c_muted),
                 ]
             else:
-                # Single job (indent=5)
+                # Single job (no grouping) — show name + dimmed id
                 return [
-                    Text(f'     {item["name"]}'),
+                    _job_name_cell('  ', item['name'], item['jid'], c_muted, single=True),
                     Text('', style=c_muted),
                     Text(item['gpu'], style=c_muted),
                     Text(item['part'], style=c_muted),
@@ -889,7 +1131,7 @@ class MyJobsWidget(FoldableTableMixin, Widget):
 
         icon = '▶' if is_collapsed else '▼'
         return [
-            Text(f'   {icon} {proj}', style='bold'),
+            Text(f'  {icon} {proj}', style='bold'),
             Text(str(n), style=f'bold {c_muted}'),
             Text(str(n_gpu) if n_gpu else '', style=f'bold {c_muted}'),
             Text(items[0]['part'], style=c_muted),
@@ -921,7 +1163,7 @@ class MyJobsWidget(FoldableTableMixin, Widget):
         sg_start = first.get('start', '')
         sg_ago = fmt_time(sg_start) if sg_start and sg_start not in ('N/A', 'Unknown') else '—'
         return [
-            Text(f'     {icon} {first["name"]}', style=''),
+            Text(f'    {icon} {first["name"]}', style=''),
             Text(f' {sg_n}', style=c_muted),
             Text(str(sg_gpu) if sg_gpu else '', style=c_muted),
             Text(first['part'], style=c_muted),
@@ -987,7 +1229,8 @@ class MyJobsWidget(FoldableTableMixin, Widget):
 
         self.post_message(self.RunningCount(n_run, n_pend))
 
-        uncached = [j for j in self._new_first_jids if j not in self._log_hints]
+        all_jids = list(self._job_data.keys())
+        uncached = [j for j in all_jids if j not in self._log_hints]
         if uncached:
             self.run_worker(
                 lambda jids=uncached: self._fetch_log_hints(jids),
@@ -1088,20 +1331,8 @@ class MyJobsWidget(FoldableTableMixin, Widget):
         # Current tab keys
         if key.startswith(_IND):
             return key.removeprefix(_IND)
-        if key.startswith(_PROJ):
-            keys = self._active_row_keys()
-            dt = self._active_dt()
-            try:
-                cursor_row = dt.cursor_row
-            except Exception:
-                return None
-            for i in range(cursor_row + 1, len(keys)):
-                v = keys[i]
-                if v.startswith(_PROJ):
-                    break
-                if v.startswith(_IND):
-                    return v.removeprefix(_IND)
-                return v
+        # Fold group keys — not individual jobs
+        if key.startswith((_PROJ, 'submit::', 'gpu::', 'st::')):
             return None
         return key
 
@@ -1156,8 +1387,8 @@ class MyJobsWidget(FoldableTableMixin, Widget):
             self._toggle_and_rebuild(dt, ctx, tree, key)
             return
 
-        # Current tab: project row
-        if key.startswith(_PROJ):
+        # Current tab: project, submit-date, or partition row
+        if key.startswith(_PROJ) or key.startswith('submit::') or key.startswith('gpu::') or key.startswith('st::'):
             self._toggle_and_rebuild(dt, ctx, tree, key)
             return
 

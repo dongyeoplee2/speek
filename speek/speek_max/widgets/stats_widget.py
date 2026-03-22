@@ -625,7 +625,14 @@ class StatsWidget(Widget):
                             oom_verdicts = _json.loads(verdict_file.read_text())
                         except Exception:
                             pass
-                        known_oom_jids = {jid for jid, v in oom_verdicts.items() if v}
+                        # Support both old {jid: bool} and new {jid: {is_oom, reason}}
+                        known_oom_jids = set()
+                        for jid, v in oom_verdicts.items():
+                            if isinstance(v, dict):
+                                if v.get('is_oom'):
+                                    known_oom_jids.add(jid)
+                            elif v:
+                                known_oom_jids.add(jid)
 
                         rows = fetch_history(days=days)
                         scanned = 0
@@ -841,8 +848,15 @@ class StatsWidget(Widget):
             try:
                 scroll = self.query_one('#stats-breakdown-scroll', VerticalScroll)
                 scroll.remove_children()
-                # Sort by total GPU hours descending
-                ordered = _sorted_users(per_group)
+                # Sort: user dim by temporal presence, others by total usage
+                if self._dim == 'user':
+                    ordered = _sorted_users(per_group)
+                else:
+                    ordered = sorted(
+                        per_group.keys(),
+                        key=lambda k: sum(per_group[k].get('buckets', [])),
+                        reverse=True,
+                    )
                 sorted_groups = [(u, per_group[u]) for u in ordered]
                 # Build color map for user dimension
                 user_color_map: Dict[str, str] = {}

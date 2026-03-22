@@ -15,15 +15,34 @@ class ConfirmationModal(SpeekModal[bool]):
     DEFAULT_CSS = """
     ConfirmationModal {
         align: center middle;
-        height: auto;
+        width: 100%;
+        height: 100%;
+
+        & #confirmation-screen {
+            width: 60;
+            min-width: 40;
+            max-width: 80%;
+            height: auto;
+            content-align: center middle;
+        }
+
+        & #confirmation-screen Static {
+            width: 100%;
+            text-align: center;
+            color: $text;
+            text-style: bold;
+            margin-bottom: 1;
+        }
+
         & #confirmation-buttons {
             margin-top: 1;
             width: 100%;
-            height: 1;
+            height: 3;
             align: center middle;
 
             & > Button {
                 width: 1fr;
+                min-width: 12;
             }
         }
     }

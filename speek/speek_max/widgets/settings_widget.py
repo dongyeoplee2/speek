@@ -78,7 +78,7 @@ class SettingsWidget(Widget):
         """Compose the settings panel."""
         with VerticalScroll(id='config-scroll'):
             with Vertical(id='config-content'):
-                # ── Appearance ────────────────────────────────────────
+                # ── Appearance (no apply — theme previews live) ──
                 yield Label('── Appearance ──', classes='config-section-header')
                 with Vertical(classes='config-card'):
                     with Horizontal(classes='config-row'):
@@ -106,11 +106,11 @@ class SettingsWidget(Widget):
                             yield Label(cmd, classes='config-label config-cmd')
                             yield Checkbox(value=True, id=sw_id, classes='config-switch')
                             yield Static(desc, classes='config-desc')
-                    with Horizontal(classes='config-row config-apply-row'):
-                        yield Button('Apply', id='apply-commands',
-                                     classes='config-apply-btn', disabled=True)
+                    with Horizontal(classes='config-btn-row'):
                         yield Static('', id='status-commands', markup=True,
                                      classes='config-desc')
+                        yield Button('Apply', id='apply-commands',
+                                     variant='primary', disabled=True, compact=True)
 
                 # ── Fine Controls ─────────────────────────────────────
                 yield Label('── Fine Controls ──', classes='config-section-header')
@@ -125,11 +125,11 @@ class SettingsWidget(Widget):
                             yield Label(lbl, classes='config-label')
                             yield Checkbox(value=True, id=sw_id, classes='config-switch')
                             yield Static(desc, classes='config-desc')
-                    with Horizontal(classes='config-row config-apply-row'):
-                        yield Button('Apply', id='apply-features',
-                                     classes='config-apply-btn', disabled=True)
+                    with Horizontal(classes='config-btn-row'):
                         yield Static('', id='status-features', markup=True,
                                      classes='config-desc')
+                        yield Button('Apply', id='apply-features',
+                                     variant='primary', disabled=True, compact=True)
 
                 # ── Performance ───────────────────────────────────────
                 yield Label('── Performance ──', classes='config-section-header')
@@ -163,11 +163,11 @@ class SettingsWidget(Widget):
                             id='history-lookback-select', allow_blank=False,
                         )
                         yield Static('days of history to show', classes='config-desc')
-                    with Horizontal(classes='config-row config-apply-row'):
-                        yield Button('Apply', id='apply-performance',
-                                     classes='config-apply-btn', disabled=True)
+                    with Horizontal(classes='config-btn-row'):
                         yield Static('', id='status-performance', markup=True,
                                      classes='config-desc')
+                        yield Button('Apply', id='apply-performance',
+                                     variant='primary', disabled=True, compact=True)
 
                 # ── Stats ─────────────────────────────────────────────
                 yield Label('── Stats ──', classes='config-section-header')
@@ -182,11 +182,11 @@ class SettingsWidget(Widget):
                             allow_blank=False,
                         )
                         yield Static('hours to scan for failed/timeout/OOM', classes='config-desc')
-                    with Horizontal(classes='config-row config-apply-row'):
-                        yield Button('Apply', id='apply-stats',
-                                     classes='config-apply-btn', disabled=True)
+                    with Horizontal(classes='config-btn-row'):
                         yield Static('', id='status-stats', markup=True,
                                      classes='config-desc')
+                        yield Button('Apply', id='apply-stats',
+                                     variant='primary', disabled=True, compact=True)
 
                 # ── Display ───────────────────────────────────────────
                 yield Label('── Display ──', classes='config-section-header')
@@ -200,11 +200,11 @@ class SettingsWidget(Widget):
                             allow_blank=False,
                         )
                         yield Static('how to show timestamps in tables', classes='config-desc')
-                    with Horizontal(classes='config-row config-apply-row'):
-                        yield Button('Apply', id='apply-display',
-                                     classes='config-apply-btn', disabled=True)
+                    with Horizontal(classes='config-btn-row'):
                         yield Static('', id='status-display', markup=True,
                                      classes='config-desc')
+                        yield Button('Apply', id='apply-display',
+                                     variant='primary', disabled=True, compact=True)
 
                 # ── Storage ───────────────────────────────────────────
                 yield Label('── Storage ──', classes='config-section-header')
@@ -218,11 +218,11 @@ class SettingsWidget(Widget):
                             allow_blank=False,
                         )
                         yield Static('max tracked read/unread job IDs', classes='config-desc')
-                    with Horizontal(classes='config-row config-apply-row'):
-                        yield Button('Apply', id='apply-storage',
-                                     classes='config-apply-btn', disabled=True)
+                    with Horizontal(classes='config-btn-row'):
                         yield Static('', id='status-storage', markup=True,
                                      classes='config-desc')
+                        yield Button('Apply', id='apply-storage',
+                                     variant='primary', disabled=True, compact=True)
 
                 # ── Highlights ────────────────────────────────────────
                 yield Label('── Highlights ──', classes='config-section-header')
@@ -245,17 +245,39 @@ class SettingsWidget(Widget):
                             allow_blank=False,
                         )
                         yield Static('duration for new event row highlight', classes='config-desc')
-                    with Horizontal(classes='config-row config-apply-row'):
-                        yield Button('Apply', id='apply-highlights',
-                                     classes='config-apply-btn', disabled=True)
+                    with Horizontal(classes='config-btn-row'):
                         yield Static('', id='status-highlights', markup=True,
                                      classes='config-desc')
+                        yield Button('Apply', id='apply-highlights',
+                                     variant='primary', disabled=True, compact=True)
 
-                # ── Cache ─────────────────────────────────────────────
-                yield Label('── Cache ──', classes='config-section-header')
+                # ── Scan & Index ──────────────────────────────────
+                yield Label('── Scan & Index ──', classes='config-section-header')
                 with Vertical(classes='config-card'):
-                    yield Static('', id='cache-info-display', markup=True,
+                    with Horizontal(classes='config-row'):
+                        yield Label('Log scan', classes='config-label')
+                        yield Button('Run', id='cache-scan-all-btn',
+                                     variant='primary', compact=True)
+                        yield Static('scan 30d of job logs for OOM, NCCL, NaN, crashes',
+                                     classes='config-desc')
+                    with Horizontal(classes='config-row'):
+                        yield Label('Cluster probe', classes='config-label')
+                        yield Button('Run', id='cache-reprobe-btn',
+                                     variant='primary', compact=True)
+                        yield Static('re-detect available SLURM commands and sacct fields',
+                                     classes='config-desc')
+                    with Horizontal(classes='config-row'):
+                        yield Label('TTL caches', classes='config-label')
+                        yield Button('Flush', id='cache-clear-mem-btn',
+                                     variant='warning', compact=True)
+                        yield Static('clear in-memory caches (next refresh fetches fresh)',
+                                     classes='config-desc')
+                    yield Static('', id='cache-status', markup=True,
                                  classes='config-desc')
+
+                # ── Retention ─────────────────────────────────────
+                yield Label('── Retention ──', classes='config-section-header')
+                with Vertical(classes='config-card'):
                     with Horizontal(classes='config-row'):
                         yield Label('OOM retention', classes='config-label')
                         yield SpeekSelect(
@@ -265,7 +287,8 @@ class SettingsWidget(Widget):
                             id='cache-oom-retention-select',
                             allow_blank=False,
                         )
-                        yield Static('how long to keep OOM verdicts', classes='config-desc')
+                        yield Static('how long to keep OOM scan verdicts on disk',
+                                     classes='config-desc')
                     with Horizontal(classes='config-row'):
                         yield Label('Transition retention', classes='config-label')
                         yield SpeekSelect(
@@ -275,21 +298,41 @@ class SettingsWidget(Widget):
                             id='cache-transition-retention-select',
                             allow_blank=False,
                         )
-                        yield Static('how long to keep job transitions', classes='config-desc')
+                        yield Static('how long to keep job state transitions (sacct fallback)',
+                                     classes='config-desc')
+                    with Horizontal(classes='config-btn-row'):
+                        yield Static('', classes='config-desc')
+                        yield Button('Apply', id='cache-apply-btn',
+                                     variant='success', compact=True)
+
+                # ── Clear Cache ───────────────────────────────────
+                yield Label('── Clear Cache ──', classes='config-section-header')
+                with Vertical(classes='config-card'):
+                    yield Static('', id='cache-info-display', markup=True,
+                                 classes='config-desc')
                     with Horizontal(classes='config-row'):
-                        yield Button('Clear OOM verdicts', id='cache-clear-oom-btn',
-                                     classes='config-cache-btn')
-                        yield Button('Clear job transitions', id='cache-clear-transitions-btn',
-                                     classes='config-cache-btn')
+                        yield Label('Clear OOM', classes='config-label')
+                        yield Button('Clear', id='cache-clear-oom-btn',
+                                     variant='error', compact=True)
+                        yield Static('delete all OOM scan verdicts from disk',
+                                     classes='config-desc')
                     with Horizontal(classes='config-row'):
-                        yield Button('Clear read/unread state', id='cache-clear-read-btn',
-                                     classes='config-cache-btn')
-                        yield Button('Clear all caches', id='cache-clear-all-btn',
-                                     classes='config-cache-btn')
+                        yield Label('Clear transitions', classes='config-label')
+                        yield Button('Clear', id='cache-clear-transitions-btn',
+                                     variant='error', compact=True)
+                        yield Static('delete job state transition fallback cache',
+                                     classes='config-desc')
                     with Horizontal(classes='config-row'):
-                        yield Button('Apply cache settings', id='cache-apply-btn',
-                                     classes='config-cache-btn')
-                        yield Static('', id='cache-status', markup=True,
+                        yield Label('Clear read state', classes='config-label')
+                        yield Button('Clear', id='cache-clear-read-btn',
+                                     variant='error', compact=True)
+                        yield Static('reset all read/unread markers in events',
+                                     classes='config-desc')
+                    with Horizontal(classes='config-row'):
+                        yield Label('Clear all', classes='config-label')
+                        yield Button('Clear', id='cache-clear-all-btn',
+                                     variant='error', compact=True)
+                        yield Static('delete all caches (disk + in-memory)',
                                      classes='config-desc')
 
                 # ── Session ───────────────────────────────────────────
@@ -310,13 +353,15 @@ class SettingsWidget(Widget):
                         yield Static('Textual', classes='config-value')
                     with Horizontal(classes='config-row'):
                         yield Label('Keybindings', classes='config-label')
-                        yield Static('ctrl+t  next theme   q  quit   1-6  tabs', classes='config-desc')
+                        yield Static('ctrl+t  next theme   q  quit   1-8  tabs', classes='config-desc')
 
                 # ── Save / Reset ──────────────────────────────────────
                 with Horizontal(id='settings-actions'):
-                    yield Button('💾 Save', id='settings-save-btn')
-                    yield Button('↺ Reset', id='settings-reset-btn')
                     yield Static('', id='settings-status', markup=True)
+                    yield Button('💾 Save', id='settings-save-btn',
+                                 variant='success', compact=True)
+                    yield Button('↺ Reset', id='settings-reset-btn',
+                                 variant='error', compact=True)
 
     def on_mount(self) -> None:
         self._pending: dict[str, dict[str, object]] = {}  # section → {attr: val}
@@ -368,7 +413,7 @@ class SettingsWidget(Widget):
         try:
             btn = self.query_one(f'#apply-{section}', Button)
             btn.disabled = False
-            btn.label = 'Apply *'
+            btn.label = 'Apply'
         except Exception:
             pass
 
@@ -625,8 +670,137 @@ class SettingsWidget(Widget):
             self._confirm_clear_cache('read/unread state', self._do_clear_read)
         elif bid == 'cache-clear-all-btn':
             self._confirm_clear_cache('ALL caches (in-memory + disk)', self._do_clear_all)
+        elif bid == 'cache-scan-all-btn':
+            self._scan_all_logs()
+        elif bid == 'cache-reprobe-btn':
+            self._reprobe_cluster()
+        elif bid == 'cache-clear-mem-btn':
+            self._clear_mem_caches()
         elif bid == 'cache-apply-btn':
             self._apply_cache_settings()
+
+    def _scan_all_logs(self) -> None:
+        """Scan all job logs for OOM/errors — full re-index."""
+        try:
+            self.query_one('#cache-status', Static).update(
+                '[dim]Scanning all logs…[/dim]')
+        except Exception:
+            pass
+
+        def _worker():
+            from speek.speek_max.slurm import fetch_history, get_job_log_path
+            from speek.speek_max.log_scan import detect_oom, analyze_oom, classify_error
+            from speek.speek_max.widgets.history_widget import HistoryWidget, OomResult
+            rows = fetch_history(days=30)
+            # Filter to unscanned jobs
+            to_scan = []
+            for r in rows:
+                jid = r[0]
+                if jid not in HistoryWidget._oom_results:
+                    to_scan.append(r)
+            total = len(to_scan)
+            if total == 0:
+                self.app.call_from_thread(self._on_scan_done, 0, 0)
+                return
+            scanned = 0
+            found = 0
+            for r in to_scan:
+                jid = r[0]
+                path = get_job_log_path(jid)
+                if not path:
+                    scanned += 1
+                    continue
+                scanned += 1
+                reason = detect_oom(path)
+                is_oom = bool(reason)
+                analysis = None
+                if is_oom:
+                    analysis = {
+                        'oom_analysis': analyze_oom(path),
+                        'error_analysis': classify_error(path),
+                        'log_path': path,
+                    }
+                    found += 1
+                else:
+                    err = classify_error(path)
+                    if err:
+                        analysis = {'error_analysis': err, 'log_path': path}
+                        found += 1
+                HistoryWidget._oom_results[jid] = OomResult(
+                    is_oom=is_oom, reason=reason or '', analysis=analysis)
+                # Progress update every 10 jobs
+                if scanned % 10 == 0:
+                    self.app.call_from_thread(
+                        self._on_scan_progress, scanned, total, found)
+            HistoryWidget._save_oom_disk()
+            self.app.call_from_thread(self._on_scan_done, scanned, found)
+
+        self.run_worker(_worker, thread=True, group='scan-all')
+
+    def _on_scan_progress(self, scanned: int, total: int, found: int) -> None:
+        pct = int(scanned / total * 100) if total else 0
+        bar_w = 20
+        filled = int(pct / 100 * bar_w)
+        bar = f'[bold green]{"█" * filled}[/][dim]{"░" * (bar_w - filled)}[/]'
+        try:
+            self.query_one('#cache-status', Static).update(
+                f'{bar} {pct}%  [dim]{scanned}/{total} logs, {found} issues[/dim]')
+        except Exception:
+            pass
+
+    def _on_scan_done(self, scanned: int, found: int) -> None:
+        try:
+            self.query_one('#cache-status', Static).update(
+                f'[bold green]Scanned {scanned} logs, found {found} issues[/bold green]')
+        except Exception:
+            pass
+        try:
+            from speek.speek_max.widgets.history_widget import HistoryWidget
+            self.app.query_one(HistoryWidget)._load()
+        except Exception:
+            pass
+
+    def _reprobe_cluster(self) -> None:
+        """Re-probe SLURM cluster capabilities."""
+        try:
+            self.query_one('#cache-status', Static).update(
+                '[dim]Re-probing cluster…[/dim]')
+        except Exception:
+            pass
+
+        def _worker():
+            from speek.speek_max.probe import run_probes
+            run_probes()
+            self.app.call_from_thread(self._on_reprobe_done)
+
+        self.run_worker(_worker, thread=True, group='reprobe')
+
+    def _clear_mem_caches(self) -> None:
+        """Clear all in-memory TTL caches (forces fresh data on next refresh)."""
+        try:
+            from speek.speek_max.slurm import clear_all_caches
+            clear_all_caches()
+            self.query_one('#cache-status', Static).update(
+                '[bold green]In-memory caches cleared — next refresh will fetch fresh data[/bold green]')
+        except Exception as e:
+            try:
+                self.query_one('#cache-status', Static).update(
+                    f'[bold red]Error: {e}[/bold red]')
+            except Exception:
+                pass
+        self._refresh_cache_info()
+
+    def _on_reprobe_done(self) -> None:
+        try:
+            self.query_one('#cache-status', Static).update(
+                '[bold green]Cluster re-probed[/bold green]')
+        except Exception:
+            pass
+        try:
+            from speek.speek_max.widgets.sysinfo_widget import SysInfoWidget
+            self.app.query_one(SysInfoWidget)._render_info()
+        except Exception:
+            pass
 
     def _confirm_apply_section(self, section: str) -> None:
         """Show confirmation popup, then apply buffered changes for a section."""
@@ -723,7 +897,7 @@ class SettingsWidget(Widget):
                 f.unlink()
             # Also clear in-memory cache
             from speek.speek_max.widgets.history_widget import HistoryWidget
-            HistoryWidget._oom_scan_cache.clear()
+            HistoryWidget._oom_results.clear()
             HistoryWidget._oom_disk_loaded = False
         except Exception:
             pass

@@ -31,6 +31,7 @@ from speek.speek_max.widgets.stats_widget import StatsWidget
 from speek.speek_max.widgets.sysinfo_widget import SysInfoWidget
 from speek.speek_max.widgets.panel_divider import PanelDivider
 from speek.speek_max.widgets.users_widget import UsersWidget
+from speek.speek_max.widgets.logs_widget import LogsWidget
 
 
 class _SpeekScreen(Screen):
@@ -69,9 +70,10 @@ class SpeekMax(App[None]):
         Binding("2", "switch_tab('nodes')",    "Nodes",    show=False),
         Binding("3", "switch_tab('users')",    "Users",    show=False),
         Binding("4", "switch_tab('stats')",    "Stats",    show=False),
-        Binding("5", "switch_tab('settings')", "Settings", show=False),
-        Binding("6", "switch_tab('sysinfo')",  "Info",     show=False),
-        Binding("7", "switch_tab('help')",     "Help",     show=False),
+        Binding("5", "switch_tab('logs')",     "Logs",     show=False),
+        Binding("6", "switch_tab('settings')", "Settings", show=False),
+        Binding("7", "switch_tab('sysinfo')",  "Info",     show=False),
+        Binding("8", "switch_tab('help')",     "Help",     show=False),
         Binding("d", "view_details",           "Details",  show=True),
         Binding("f", "switch_focus",           "⇥ Focus",  show=True),
         Binding("colon", "focus_command",      "Shell",    show=True),
@@ -162,11 +164,13 @@ class SpeekMax(App[None]):
                         yield UsersWidget()
                     with TabPane("4 Stats", id="stats"):
                         yield StatsWidget()
-                    with TabPane("5 Settings", id="settings"):
+                    with TabPane("5 Logs", id="logs"):
+                        yield LogsWidget()
+                    with TabPane("6 Settings", id="settings"):
                         yield SettingsWidget()
-                    with TabPane("6 Info", id="sysinfo"):
+                    with TabPane("7 Info", id="sysinfo"):
                         yield SysInfoWidget()
-                    with TabPane("7 Help", id="help"):
+                    with TabPane("8 Help", id="help"):
                         yield HelpWidget()
             yield PanelDivider()
             with Vertical(id='side-panel'):
@@ -248,7 +252,13 @@ class SpeekMax(App[None]):
             pass
 
     def on_command_bar_command_executed(self, event: CommandBar.CommandExecuted) -> None:
-        """Refresh data after sbatch/scancel commands."""
+        """Forward CLI output to queue log tab and refresh data after sbatch/scancel."""
+        # Append to Logs tab
+        try:
+            self.query_one(LogsWidget).append(
+                event.command, event.output, event.success)
+        except Exception:
+            pass
         cmd_name = event.command.split()[0] if event.command else ''
         if cmd_name in ('sbatch', 'scancel'):
             try:

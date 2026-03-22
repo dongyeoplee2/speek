@@ -451,7 +451,7 @@ def fetch_my_jobs(user: str) -> List[Tuple]:
             return entry[1]
     try:
         out = subprocess.check_output(
-            ['squeue', '-u', user, '-o', '%i|%j|%P|%b|%T|%M|%S', '-h'],
+            ['squeue', '-u', user, '-o', '%i|%j|%P|%b|%T|%M|%S|%V', '-h'],
             text=True, stderr=subprocess.DEVNULL,
         )
     except Exception:
@@ -460,18 +460,24 @@ def fetch_my_jobs(user: str) -> List[Tuple]:
     for ln in out.splitlines():
         if not ln.strip():
             continue
-        parts = (ln.split('|') + [''] * 7)[:7]
-        jid, name, part, gres, state, elapsed, start_raw = parts
+        parts = (ln.split('|') + [''] * 8)[:8]
+        jid, name, part, gres, state, elapsed, start_raw, submit_raw = parts
         eta = _fmt_eta(start_raw) if state.strip().upper() == 'PENDING' else ''
+        gres_s = gres.strip()
+        # Extract GPU model name from gres (e.g. 'gpu:a100:2' → 'a100')
+        _gm = GPU_RE_NAMED.search(gres_s)
+        gpu_model = _gm.group(1).lower() if _gm else ''
         rows.append((
             jid.strip(),
             name.strip(),
             part.strip(),
-            _gpu_count(gres.strip()),
+            _gpu_count(gres_s),
             state.strip(),
             elapsed.strip(),
             eta,
             start_raw.strip(),
+            submit_raw.strip(),
+            gpu_model,
         ))
     rows.sort(key=lambda r: (0 if r[4] == 'RUNNING' else 1))
     with _my_jobs_lock:
