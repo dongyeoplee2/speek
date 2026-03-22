@@ -906,7 +906,7 @@ class HistoryWidget(FoldableTableMixin, Widget):
             stats.update(self._stats_text(groups, tab))
             empty = len(groups) == 0
             dt.display = not empty
-            stats.set_class(empty, 'history-empty')
+            stats.display = not empty
             # Show/hide empty-state placeholder
             try:
                 es = self.query_one(f'#empty-{tab}', Static)
