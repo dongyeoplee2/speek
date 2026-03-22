@@ -55,24 +55,34 @@ def _render_stacked_chart(per_group_ts: Dict, peak: float, n_buckets: int) -> Te
     user_color = {u: _USER_COLORS[i % len(_USER_COLORS)] for i, u in enumerate(users)}
 
     height = 8  # rows of block characters — matches sparkline visual height
-    lines: List[Text] = []
+    # Source bucket count from actual data
+    src_len = max((len(d.get('buckets', [])) for d in per_group_ts.values()), default=n_buckets)
+    display_w = n_buckets  # this is the actual widget width
 
-    for row in range(height - 1, -1, -1):  # top row first
+    # Pre-compute resampled per-column data
+    col_data: List[List[Tuple[str, float]]] = []
+    for col in range(display_w):
+        src_s = int(col * src_len / display_w)
+        src_e = int((col + 1) * src_len / display_w)
+        src_e = max(src_e, src_s + 1)
+        segments = []
+        for u in users:
+            bkts = per_group_ts[u].get('buckets', [])
+            val = sum(bkts[i] for i in range(src_s, min(src_e, len(bkts))))
+            val /= max(1, src_e - src_s)
+            if val > 0:
+                segments.append((u, val))
+        col_data.append(segments)
+
+    lines: List[Text] = []
+    for row in range(height - 1, -1, -1):
         line = Text()
         row_bottom = (row / height) * peak
         row_top = ((row + 1) / height) * peak
 
-        for col in range(n_buckets):
-            # Gather each user's value at this bucket
-            segments = []
-            total = 0.0
-            for u in users:
-                val = 0.0
-                bkts = per_group_ts[u].get('buckets', [])
-                if col < len(bkts):
-                    val = bkts[col]
-                segments.append((u, val))
-                total += val
+        for col in range(display_w):
+            segments = col_data[col]
+            total = sum(v for _, v in segments)
 
             if total <= row_bottom:
                 line.append(' ')
@@ -739,10 +749,15 @@ class StatsWidget(Widget):
 
             if is_user_dim:
                 # Show stacked colored chart, hide sparkline
-                self.query_one(_SPARKLINE_ID, Sparkline).display = False
+                sparkline = self.query_one(_SPARKLINE_ID, Sparkline)
+                sparkline.display = False
                 peak = ts.get('peak', 0)
-                _, n_buckets_cfg, _ = _RANGES.get(self._range_key, _RANGES['7d'])
-                chart_text = _render_stacked_chart(per_group, peak, n_buckets_cfg)
+                # Use actual widget width, not config buckets
+                try:
+                    chart_w = sparkline.size.width or 60
+                except Exception:
+                    chart_w = 60
+                chart_text = _render_stacked_chart(per_group, peak, chart_w)
                 buf = StringIO()
                 _RCon(file=buf, force_terminal=True, width=200, no_color=False).print(chart_text, end='')
                 self.query_one(_STACKED_ID, Static).update(buf.getvalue())
