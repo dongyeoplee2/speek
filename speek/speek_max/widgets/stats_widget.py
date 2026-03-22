@@ -743,8 +743,16 @@ class StatsWidget(Widget):
                 self._last_peak = peak
                 _, n_buckets, _ = _RANGES.get(self._range_key, _RANGES['7d'])
                 chart_text = _render_stacked_chart(per_group, peak, n_buckets)
-                self.query_one(_STACKED_ID, Static).update(chart_text)
-                self.query_one(_LEGEND_ID, Static).update(_build_user_legend(per_group))
+                # Convert Rich Text to markup string for Static.update
+                from io import StringIO
+                from rich.console import Console as _RCon
+                buf = StringIO()
+                _RCon(file=buf, force_terminal=True, width=200, no_color=False).print(chart_text, end='')
+                self.query_one(_STACKED_ID, Static).update(buf.getvalue())
+                buf2 = StringIO()
+                legend = _build_user_legend(per_group)
+                _RCon(file=buf2, force_terminal=True, width=200, no_color=False).print(legend, end='')
+                self.query_one(_LEGEND_ID, Static).update(buf2.getvalue())
             else:
                 self.query_one(_SPARKLINE_ID, Sparkline).data = ts['buckets']
 
