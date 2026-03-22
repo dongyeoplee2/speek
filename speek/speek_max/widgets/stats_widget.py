@@ -1,8 +1,9 @@
 """stats_widget.py — GPU time-usage statistics: sparkline timeline + breakdown table."""
 from __future__ import annotations
 
+import time as _time
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from rich.text import Text
 from rich.table import Table
@@ -210,6 +211,211 @@ def _build_issues(data: Dict, hours: int) -> Table:
     return t
 
 
+# ── Dashboard helpers ──────────────────────────────────────────────────────────
+
+_DASHBOARD_TTL = 30.0      # seconds — same as cluster stats
+_HEATMAP_TTL   = 300.0     # 5 min — historical data changes slowly
+_BAR_MAX_W     = 30        # max bar width in characters
+
+
+def _build_partition_bars(cluster_stats: Dict, job_stats: Dict) -> Text:
+    """Horizontal stacked bar chart: green=free, red=used, dim=remaining capacity."""
+    if not cluster_stats:
+        return Text('  No GPU data available', style='dim')
+
+    # Merge pending counts from job_stats into cluster_stats by model
+    pending_by_model: Dict[str, int] = {}
+    for model, jd in job_stats.get('by_model', {}).items():
+        pending_by_model[model] = jd.get('PD', 0)
+
+    # Sort by free GPUs descending (best option first)
+    entries = sorted(
+        cluster_stats.items(),
+        key=lambda kv: kv[1].get('Free', 0),
+        reverse=True,
+    )
+
+    max_total = max((d['Total'] for _, d in entries), default=1) or 1
+    name_w = max((len(n) for n, _ in entries), default=4)
+
+    t = Text()
+    t.append('  Where to submit?\n', style='bold')
+    for i, (model, d) in enumerate(entries):
+        total = d['Total']
+        free  = d['Free']
+        pend  = pending_by_model.get(model, 0)
+
+        bar_w = max(1, int(total / max_total * _BAR_MAX_W))
+        g = max(0, int(free / total * bar_w)) if total else 0
+        r = bar_w - g  # used GPUs portion
+
+        t.append(f'  {model:<{name_w}}  ', style='bold')
+        if g > 0:
+            t.append('█' * g, style='green')
+        if r > 0:
+            t.append('█' * r, style='red')
+        remaining = _BAR_MAX_W - bar_w
+        if remaining > 0:
+            t.append('░' * remaining, style='dim')
+        t.append(f'  {free:>2} free', style='green' if free > 0 else 'dim')
+        if pend > 0:
+            t.append(f'  ⏸{pend}', style='yellow')
+        if i < len(entries) - 1:
+            t.append('\n')
+    return t
+
+
+def _build_wait_estimate(cluster_stats: Dict, job_stats: Dict) -> Text:
+    """Estimated wait per partition based on free GPUs and pending jobs."""
+    if not cluster_stats:
+        return Text('')
+
+    pending_by_model: Dict[str, int] = {}
+    for model, jd in job_stats.get('by_model', {}).items():
+        pending_by_model[model] = jd.get('PD', 0)
+
+    avg_runtime_min = 60  # default 1 hour if sacct unavailable
+
+    entries = sorted(
+        cluster_stats.items(),
+        key=lambda kv: kv[1].get('Free', 0),
+        reverse=True,
+    )
+
+    name_w = max((len(n) for n, _ in entries), default=4)
+    wait_bar_max = 16
+
+    t = Text()
+    t.append('\n  Expected wait\n', style='bold')
+    for i, (model, d) in enumerate(entries):
+        total = d['Total']
+        free  = d['Free']
+        pend  = pending_by_model.get(model, 0)
+
+        # Estimate wait
+        if free > 0:
+            wait_min = 0
+            wait_label = 'instant'
+            color = 'green'
+        elif total > 0:
+            wait_min = int((pend / total) * avg_runtime_min)
+            if wait_min < 1:
+                wait_label = 'instant'
+                color = 'green'
+            elif wait_min < 60:
+                wait_label = f'~{wait_min} min'
+                color = 'yellow'
+            else:
+                hours = wait_min / 60
+                wait_label = f'~{hours:.0f}h'
+                color = 'red'
+        else:
+            wait_min = 0
+            wait_label = 'N/A'
+            color = 'dim'
+
+        bar_w = min(wait_bar_max, max(1, int(wait_min / max(avg_runtime_min * 2, 1) * wait_bar_max)))
+        if wait_min == 0:
+            bar_w = 1
+
+        t.append(f'  {model:<{name_w}}  ', style='bold')
+        bar_char = '▏' if bar_w == 1 and wait_min == 0 else '█'
+        t.append(bar_char * bar_w, style=color)
+        pad = wait_bar_max - bar_w
+        if pad > 0:
+            t.append(' ' * pad)
+        t.append(f'  {wait_label:<10s}', style=color)
+        t.append(f'{free} free, {pend} pending', style='dim')
+        if i < len(entries) - 1:
+            t.append('\n')
+    return t
+
+
+def _build_hourly_heatmap(hourly_data: Dict[str, List[float]]) -> Text:
+    """24-column heatmap of average GPU availability by hour-of-day per model."""
+    if not hourly_data:
+        return Text('')
+
+    # Shade characters by availability percentage
+    def _shade(pct: float) -> Tuple[str, str]:
+        if pct > 0.70:
+            return '██', 'green'
+        elif pct > 0.40:
+            return '▓▓', 'yellow'
+        elif pct > 0.20:
+            return '▒▒', '#ff8800'
+        else:
+            return '░░', 'red'
+
+    name_w = max((len(n) for n in hourly_data), default=4)
+
+    t = Text()
+    t.append('\n  Best time to submit (last 7d avg)\n', style='bold')
+    # Hour header — show every 2 hours
+    t.append(' ' * (name_w + 3))
+    for h in range(0, 24, 2):
+        t.append(f'{h:<4d}', style='dim')
+    t.append('\n')
+
+    for model, avail in sorted(hourly_data.items()):
+        t.append(f'  {model:<{name_w}}  ', style='bold')
+        for h in range(0, 24, 2):
+            pct = avail[h] if h < len(avail) else 0.5
+            ch, color = _shade(pct)
+            t.append(ch, style=color)
+        t.append('\n')
+    return t
+
+
+def _compute_hourly_heatmap(rows, cluster_stats: Dict) -> Dict[str, List[float]]:
+    """Compute avg GPU availability by hour-of-day per partition/model.
+
+    Returns {model: [availability_pct_for_each_hour] * 24}.
+    """
+    from collections import defaultdict
+
+    # Track GPU-seconds used per hour per partition
+    usage_per_hour: Dict[str, List[float]] = defaultdict(lambda: [0.0] * 24)
+    samples_per_hour: Dict[str, List[int]] = defaultdict(lambda: [0] * 24)
+
+    for row in rows:
+        # row: (jid, user, partition, nodelist, start_dt, end_dt, gpus, elapsed_secs, alloc_gres)
+        partition = row[2]
+        start_dt  = row[4]
+        end_dt    = row[5]
+        gpus      = row[6]
+
+        if not start_dt or not gpus:
+            continue
+        if end_dt is None:
+            end_dt = datetime.now()
+
+        # Walk through each hour the job spans
+        cur = start_dt
+        while cur < end_dt:
+            h = cur.hour
+            usage_per_hour[partition][h] += gpus
+            samples_per_hour[partition][h] += 1
+            cur += timedelta(hours=1)
+            if (cur - start_dt).total_seconds() > 7 * 86400:
+                break  # safety limit
+
+    # Convert to availability percentage
+    result: Dict[str, List[float]] = {}
+    for model, stats in cluster_stats.items():
+        total = stats.get('Total', 1) or 1
+        hours_avail = [0.5] * 24  # default 50% if no data
+        if model in usage_per_hour:
+            for h in range(24):
+                n = samples_per_hour[model][h]
+                if n > 0:
+                    avg_used = usage_per_hour[model][h] / n
+                    hours_avail[h] = max(0.0, min(1.0, 1.0 - avg_used / total))
+                # else keep default
+        result[model] = hours_avail
+    return result
+
+
 # ── Widget ─────────────────────────────────────────────────────────────────────
 
 class StatsWidget(Widget):
@@ -234,6 +440,9 @@ class StatsWidget(Widget):
         self._last_hover_idx: int = -1
         self._w_sparkline: Sparkline | None = None
         self._w_hover:     Static    | None = None
+        # Dashboard caches
+        self._dashboard_cache: Optional[Tuple[float, Text]] = None
+        self._heatmap_cache: Optional[Tuple[float, Dict[str, List[float]]]] = None
 
     # ── Compose ────────────────────────────────────────────────────────────────
 
@@ -271,6 +480,9 @@ class StatsWidget(Widget):
             yield Button('Apply', id='stats-cust-apply',
                          classes='stats-apply-btn')
 
+        # ── now dashboard ─────────────────────────────────────────────────────
+        yield Static('', id='stats-dashboard', markup=True)
+
         # ── chart area ────────────────────────────────────────────────────────
         with Vertical(id='stats-chart-area'):
             with Horizontal(id='stats-chart-header'):
@@ -306,6 +518,7 @@ class StatsWidget(Widget):
         self.query_one(_FILTER_BAR).display = False
         self.query_one('#stats-custom-bar').display = False
         self.query_one(_ISSUES_ID).display = False
+        self._load_dashboard()
         self._load()
         self._load_issues()
 
@@ -431,8 +644,86 @@ class StatsWidget(Widget):
     # ── Data load ──────────────────────────────────────────────────────────────
 
     def action_refresh_data(self) -> None:
+        self._load_dashboard()
         self._load()
         self._load_issues()
+
+    # ── Dashboard ──────────────────────────────────────────────────────────────
+
+    def _load_dashboard(self) -> None:
+        """Fetch cluster + job stats in background and render the Now dashboard."""
+        # Check cache
+        if self._dashboard_cache is not None:
+            ts, rendered = self._dashboard_cache
+            if _time.monotonic() - ts < _DASHBOARD_TTL:
+                try:
+                    self.query_one('#stats-dashboard', Static).update(rendered)
+                except Exception:
+                    pass
+                return
+
+        has_sacct = getattr(self.app, '_cmd_sacct', True)
+
+        def _worker():
+            try:
+                from speek.speek_max.slurm import (
+                    fetch_cluster_stats, fetch_job_stats,
+                    fetch_stats_rows_chunked,
+                )
+
+                cluster = fetch_cluster_stats()
+                jobs = fetch_job_stats()
+
+                # Build partition bars + wait estimate
+                part_bars = _build_partition_bars(cluster, jobs)
+                wait_est = _build_wait_estimate(cluster, jobs)
+
+                # Build heatmap if sacct available
+                heatmap_text = Text('')
+                if has_sacct:
+                    hm_cache = self._heatmap_cache
+                    now = _time.monotonic()
+                    if hm_cache is not None and now - hm_cache[0] < _HEATMAP_TTL:
+                        hourly = hm_cache[1]
+                    else:
+                        end_dt = datetime.now()
+                        start_dt = end_dt - timedelta(days=7)
+                        all_rows: list = []
+
+                        def _collect(rows, done, total):
+                            all_rows.clear()
+                            all_rows.extend(rows)
+
+                        try:
+                            fetch_stats_rows_chunked(start_dt, end_dt, _collect)
+                            hourly = _compute_hourly_heatmap(all_rows, cluster)
+                            self._heatmap_cache = (_time.monotonic(), hourly)
+                        except Exception:
+                            hourly = {}
+
+                    if hourly:
+                        heatmap_text = _build_hourly_heatmap(hourly)
+
+                # Combine all sections
+                combined = Text()
+                combined.append_text(part_bars)
+                combined.append_text(wait_est)
+                combined.append_text(heatmap_text)
+
+                self._dashboard_cache = (_time.monotonic(), combined)
+                self.app.call_from_thread(self._render_dashboard, combined)
+            except Exception:
+                pass
+
+        self.run_worker(_worker, thread=True, group='stats-dashboard')
+
+    @safe('Stats dashboard')
+    def _render_dashboard(self, content: Text) -> None:
+        """Update the dashboard Static widget."""
+        try:
+            self.query_one('#stats-dashboard', Static).update(content)
+        except Exception:
+            pass
 
     def _load_issues(self) -> None:
         if not getattr(self.app, '_cmd_sacct', True):
