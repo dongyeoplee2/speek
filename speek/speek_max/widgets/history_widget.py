@@ -114,7 +114,7 @@ def _time_zone_parts(zone_idx: int) -> tuple:
     from datetime import timedelta
     now = datetime.now()
     bounds = [3600, 86400, 3*86400, 7*86400, float('inf')]
-    labels = ['1h', '1d', '3d', '7d', '7d+']
+    labels = ['< 1h', 'today', '1–3d', '3–7d', '> 7d']
     age = labels[min(zone_idx, len(labels)-1)]
     if zone_idx >= 1:
         secs = bounds[zone_idx]

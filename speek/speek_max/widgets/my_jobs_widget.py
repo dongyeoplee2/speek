@@ -692,8 +692,7 @@ class MyJobsWidget(FoldableTableMixin, Widget):
                 from datetime import datetime as _dt, timedelta as _td
                 _now = _dt.now()
                 _bounds = [b for b, _ in _HIST_TIME_ZONES]
-                _labels = ['1h', '2h', '6h', '12h', '1d', '3d', '7d', '7d+']
-                age = _labels[min(zone, len(_labels)-1)]
+                age = _HIST_TIME_ZONES[min(zone, len(_HIST_TIME_ZONES)-1)][1]
                 if zone >= 5:
                     secs = _bounds[zone]
                     date_dt = _now - _td(seconds=secs) if secs != float('inf') else _now - _td(seconds=_bounds[zone-1])
