@@ -19,6 +19,10 @@ GPU_RE = re.compile(r'gpu(?::[A-Za-z0-9_\-]+)?[:=](\d+)', re.IGNORECASE)
 _LOG_RE   = re.compile(r'StdOut=(\S+)')
 _DT_FMT   = '%Y-%m-%dT%H:%M:%S'
 
+
+class SacctUnavailable(Exception):
+    """Raised when slurmdbd is unreachable (Connection refused)."""
+
 # ── scontrol TTL cache ─────────────────────────────────────────────────────────
 
 _scontrol_cache: Dict[str, Tuple[float, str]] = {}
@@ -869,11 +873,17 @@ def fetch_history(days: int) -> List[Tuple]:
             return entry[1]
     start = (datetime.now() - timedelta(days=days)).strftime(_DT_FMT)
     try:
-        out = subprocess.check_output(
-            ['sacct', '-S', start, '--parsable2', '--noheader',
+        import getpass as _gp
+        proc = subprocess.run(
+            ['sacct', '-u', _gp.getuser(), '-S', start, '--parsable2', '--noheader',
              '--format=JobID,JobName,Partition,Start,Elapsed,State,ExitCode,AllocTRES,NodeList,Submit'],
-            text=True, stderr=subprocess.DEVNULL,
+            text=True, capture_output=True, timeout=8,
         )
+        if 'Connection refused' in (proc.stderr or ''):
+            raise SacctUnavailable('slurmdbd down')
+        out = proc.stdout or ''
+    except SacctUnavailable:
+        raise
     except Exception:
         return []
     rows = []
@@ -1404,6 +1414,12 @@ def fetch_active_jobs_scontrol() -> List[Tuple]:
 
         jid = info.get('JobId', '')
         if not jid:
+            continue
+
+        # Filter to current user only
+        import getpass as _gp
+        job_user = info.get('UserId', '').split('(')[0]  # 'user(uid)' -> 'user'
+        if job_user and job_user != _gp.getuser():
             continue
 
         name = info.get('JobName', '')

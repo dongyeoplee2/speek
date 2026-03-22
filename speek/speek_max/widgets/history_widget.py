@@ -22,7 +22,7 @@ from textual.widgets import (
     TabbedContent, TabPane,
 )
 
-from speek.speek_max.slurm import fetch_history, fetch_active_jobs_scontrol
+from speek.speek_max.slurm import fetch_history, fetch_active_jobs_scontrol, SacctUnavailable
 from speek.speek_max._utils import tc, safe, state_sym, state_badge, STATE_SYMBOL
 from speek.speek_max.widgets.datatable import SpeekDataTable
 from speek.speek_max.widgets.foldable_table import (
@@ -606,36 +606,30 @@ class HistoryWidget(FoldableTableMixin, Widget):
             self.border_subtitle = ''
             self.query_one(LoadingIndicator).display = True
             days = self.lookback_days
+
+            def _sacct_with_fallback():
+                try:
+                    return fetch_history(days)
+                except SacctUnavailable:
+                    # slurmdbd is down — disable sacct and fall to scontrol+cache
+                    self.app._cmd_sacct = False
+                    self.app.notify(
+                        'sacct unavailable (slurmdbd down) — using scontrol fallback',
+                        severity='warning', timeout=6,
+                    )
+                    return self._scontrol_fallback(days)
+
             self.run_worker(
-                lambda: fetch_history(days),
+                _sacct_with_fallback,
                 thread=True, exclusive=True, group='history',
             )
         elif getattr(self.app, '_cmd_scontrol', True):
             # Level 2: scontrol show job (active/recent) + transition cache
-            from speek.speek_max.event_watcher import load_fallback_history
-            days = self.lookback_days
-            user = getattr(self.app, 'user', '')
             self.border_subtitle = '[dim]scontrol — active + cached history[/dim]'
             self.query_one(LoadingIndicator).display = True
-
-            def _scontrol_fallback():
-                active = fetch_active_jobs_scontrol()
-                cached = load_fallback_history(user=user, days=days)
-                # Merge: active jobs first, then cached (deduplicate by jid)
-                seen = set()
-                merged = []
-                for row in active:
-                    if row[0] not in seen:
-                        seen.add(row[0])
-                        merged.append(row)
-                for row in cached:
-                    if row[0] not in seen:
-                        seen.add(row[0])
-                        merged.append(row)
-                return merged
-
+            days = self.lookback_days
             self.run_worker(
-                _scontrol_fallback,
+                lambda: self._scontrol_fallback(days),
                 thread=True, exclusive=True, group='history',
             )
         else:
@@ -648,6 +642,24 @@ class HistoryWidget(FoldableTableMixin, Widget):
                     user=getattr(self.app, 'user', ''), days=days),
                 thread=True, exclusive=True, group='history',
             )
+
+    def _scontrol_fallback(self, days: int) -> List[Tuple]:
+        """Merge scontrol active jobs + event watcher transition cache."""
+        from speek.speek_max.event_watcher import load_fallback_history
+        user = getattr(self.app, 'user', '')
+        active = fetch_active_jobs_scontrol()
+        cached = load_fallback_history(user=user, days=days)
+        seen: set = set()
+        merged: List[Tuple] = []
+        for row in active:
+            if row[0] not in seen:
+                seen.add(row[0])
+                merged.append(row)
+        for row in cached:
+            if row[0] not in seen:
+                seen.add(row[0])
+                merged.append(row)
+        return merged
 
     def on_worker_state_changed(self, event) -> None:
         from textual.worker import WorkerState
