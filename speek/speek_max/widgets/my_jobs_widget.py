@@ -931,12 +931,15 @@ class MyJobsWidget(FoldableTableMixin, Widget):
         self.query_one(LoadingIndicator).display = False
         empty = self.query_one('#myjobs-empty', Static)
         stats_bar = self.query_one('#myjobs-stats', Static)
+        dt = self.query_one(SpeekDataTable)
         if not rows:
             empty.update(f'No active or pending jobs for {self.user}')
             empty.display = True
             stats_bar.display = False
+            dt.display = False
         else:
             empty.display = False
+            dt.display = True
 
         # Always post running count so header stays accurate
         self.post_message(self.RunningCount(n_run, n_pend))
@@ -948,8 +951,6 @@ class MyJobsWidget(FoldableTableMixin, Widget):
         self._last_myjobs_sig = sig
         self._last_rows = rows
         self._last_priorities = priorities or {}
-
-        dt = self.query_one(SpeekDataTable)
 
         # Prune stale data
         self._current_ctx.collapsed &= set(projects.keys())
