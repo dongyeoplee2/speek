@@ -410,7 +410,7 @@ class QueueWidget(FoldableTableMixin, Widget):
             filled = max(1, int(round(pct * w))) if pct > 0 else 0
             empty_w = w - filled
             name_cell = Text()
-            name_cell.append(f'│ {label}'[:filled].ljust(filled), style=f'bold white on {bar_color}')
+            name_cell.append(f'│ {label}'[:filled].ljust(filled), style=f'bold black on {bar_color}')
             if empty_w > 0:
                 # Remaining label text without background
                 remaining = f'│ {label}'[filled:]
