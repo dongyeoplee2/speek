@@ -462,7 +462,7 @@ class StatsWidget(Widget):
 
                 data = fetch_issue_stats(hours)
 
-                # Log OOM scan — cached per days value for 60s
+                # Log OOM scan — use persistent verdict cache + scan new jobs
                 days = max(1, hours // 24) or 1
                 cache = getattr(self, '_oom_log_cache', {})
                 cached = cache.get(days)
@@ -473,24 +473,47 @@ class StatsWidget(Widget):
                     oom_by_model = defaultdict(int)
                     oom_by_node = defaultdict(int)
                     try:
+                        # Load persistent OOM verdicts from Events widget cache
+                        import json as _json
+                        from pathlib import Path as _Path
+                        import os as _os
+                        verdict_file = _Path(
+                            _os.environ.get('XDG_CACHE_HOME', _Path.home() / '.cache')
+                        ) / 'speek' / 'oom_verdicts.json'
+                        oom_verdicts = {}
+                        try:
+                            oom_verdicts = _json.loads(verdict_file.read_text())
+                        except Exception:
+                            pass
+                        known_oom_jids = {jid for jid, v in oom_verdicts.items() if v}
+
                         rows = fetch_history(days=days)
                         scanned = 0
                         for r in rows:
-                            if scanned >= 50:
-                                break
                             jid, part = r[0], r[2]
                             state = r[5].strip() if len(r) > 5 else ''
                             nodelist = r[8].strip() if len(r) > 8 else ''
-                            if state not in ('COMPLETED', 'RUNNING'):
-                                continue
-                            scanned += 1
-                            path = get_job_log_path(jid)
-                            if path and detect_oom(path):
+                            is_oom = False
+                            # Check verdict cache first (instant)
+                            if jid in known_oom_jids:
+                                is_oom = True
+                            elif jid in oom_verdicts:
+                                pass  # already scanned, not OOM
+                            elif state in ('COMPLETED', 'RUNNING') and scanned < 50:
+                                # Scan log for new jobs
+                                scanned += 1
+                                path = get_job_log_path(jid)
+                                if path and detect_oom(path):
+                                    is_oom = True
+                            # SLURM-reported OOM state
+                            if state == 'OUT_OF_MEMORY':
+                                is_oom = True
+                            if is_oom:
                                 oom_by_model[part] += 1
-                                for node in nodelist.split(','):
-                                    node = node.strip()
-                                    if node and node not in ('None', ''):
-                                        oom_by_node[node] += 1
+                                for nd in nodelist.split(','):
+                                    nd = nd.strip()
+                                    if nd and nd not in ('None', ''):
+                                        oom_by_node[nd] += 1
                     except Exception:
                         pass
                     cache[days] = (now, dict(oom_by_model), dict(oom_by_node))
