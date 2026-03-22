@@ -697,8 +697,12 @@ class MyJobsWidget(FoldableTableMixin, Widget):
                     dlabel = f'Today  {short}'
                 elif delta == 1:
                     dlabel = f'Yesterday  {short}'
-                else:
+                elif delta < 7:
                     dlabel = f'{weekday}  {short}'
+                elif delta < 30:
+                    dlabel = f'~{delta // 7}w ago  {short}'
+                else:
+                    dlabel = f'~{delta // 30}m ago  {short}'
             except Exception:
                 dk = ''
                 dlabel = 'Unknown'

@@ -148,7 +148,13 @@ def _date_label(date_key: str) -> str:
             return f'Today  {short}'
         if delta == 1:
             return f'Yesterday  {short}'
-        return f'{weekday}  {short}'
+        if delta < 7:
+            return f'{weekday}  {short}'
+        if delta < 30:
+            weeks = delta // 7
+            return f'~{weeks}w ago  {short}'
+        months = delta // 30
+        return f'~{months}m ago  {short}'
     except Exception:
         return date_key
 
