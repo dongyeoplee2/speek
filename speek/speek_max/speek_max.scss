@@ -1187,10 +1187,10 @@ StatsWidget {
 }
 
 #stats-user-chart {
-  height: auto;
-  min-height: 4;
+  height: 1fr;
   width: 1fr;
   background: $background;
+  overflow-y: auto;
 }
 
 #stats-user-legend {
