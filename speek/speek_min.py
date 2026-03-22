@@ -398,12 +398,10 @@ def _build_model_line(m: str, d: Dict, pending: Dict, my_gpus: Dict,
     # Difference: emoji rows are 1 cell wider. But since we use len() for
     # padding before │, the extra visual cell is absorbed.
     # Actually: just make len() identical for both paths.
-    EMOJI_CHARS = 2  # fixed character count for this slot
     if emoji:
         line.append(emoji)
-        line.append(' ' * (EMOJI_CHARS - 1))
     else:
-        line.append(' ' * EMOJI_CHARS)
+        line.append(' ')
     line.append_text(_bar(U, T, W_BAR))
     line.append_text(_col(cnt_t, W_CNT))
     line.append_text(_col(dem_t, W_DEM))
@@ -595,9 +593,8 @@ def build_panel(stats: Dict[str, Dict], my_gpus: Dict,
     emoji_t = _usage_emoji(total_pct * 100)
     if emoji_t:
         total_line.append(emoji_t, style=bg)
-        total_line.append(' ', style=bg)  # emoji(1char) + 1space = 2chars
     else:
-        total_line.append('  ', style=bg)  # 2chars = same len()
+        total_line.append(' ', style=bg)
     total_line.append_text(_bar(total_U, total_T, col_widths['bar']))
     total_line.append_text(_col(tcnt, col_widths['cnt']))
     # Pad to same │ position as model lines (use len, not display_width — matches model rows)
