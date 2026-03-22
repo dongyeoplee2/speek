@@ -346,7 +346,9 @@ class QueueWidget(FoldableTableMixin, Widget):
         self._ctx.collapsed &= set(partition_order)
 
         tree: List[TreeNode] = []
-        for part in partition_order:
+        for i, part in enumerate(partition_order):
+            if i > 0:
+                tree.append(Spacer(key=f'sp::{part}'))
             count_cell = Text(str(partition_count.get(part, 0)), style='bold')
             gpu_total = partition_gpus.get(part, 0)
             gpu_cell = Text(str(gpu_total) if gpu_total else '', style='bold')
