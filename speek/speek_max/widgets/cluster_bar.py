@@ -136,7 +136,7 @@ def build_cluster_renderable(
             t.append(' ' * (width - 4) + '|', style=text_muted)
             return t
         color = _util_color(pct)
-        fg = 'black' if pct < 0.90 else 'white'
+        fg = 'black'
         pct_str = f'{round(pct * 100)}%'
         fw = max(int(round(pct * width)), len(pct_str))
         aw = width - fw
