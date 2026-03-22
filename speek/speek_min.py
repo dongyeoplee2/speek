@@ -344,14 +344,16 @@ def _build_model_line(m: str, d: Dict, pending: Dict, my_gpus: Dict,
                       show_nodes: bool = True,
                       trend: Tuple[str, int] = None,
                       w_nodes: int = 14,
-                      has_any_trend: bool = False) -> Text:
+                      has_any_trend: bool = False,
+                      col_widths: Dict[str, int] = None) -> Text:
     """Build one GPU model row."""
-    W_MODEL = 8
-    W_VRAM  = 4
-    W_BAR   = 14
-    W_CNT   = 5
-    W_DEM   = 3
-    W_MY    = 6
+    cw = col_widths or {}
+    W_MODEL = cw.get('model', 8)
+    W_VRAM  = cw.get('vram', 4)
+    W_BAR   = cw.get('bar', 14)
+    W_CNT   = cw.get('cnt', 5)
+    W_DEM   = cw.get('dem', 3)
+    W_MY    = cw.get('my', 6)
 
     T, U, F = d['Total'], d['Used'], d['Free']
     pct = U / T if T else 0.0
@@ -483,6 +485,31 @@ def build_panel(stats: Dict[str, Dict], my_gpus: Dict,
     show_nodes = False
     max_node_w = 0
 
+    # Pre-pass: compute column widths from actual data
+    w_model = max((len(m) for m in models), default=6) + 1
+    w_vram = max((len(f'{stats[m].get("VRAM", "")}G') for m in models
+                  if stats[m].get('VRAM')), default=3) + 1
+    max_total = max((stats[m]['Total'] for m in models), default=9)
+    w_cnt = len(f'{max_total}/{max_total}') + 1
+    max_pd = max((pending.get(m, 0) for m in models), default=0)
+    w_dem = max(3, len(f'⏸{max_pd}') + 1) if max_pd else 2
+    # My jobs: find widest entry
+    w_my = 6
+    for m in models:
+        mg = my_gpus.get(m, {})
+        r, p = mg.get('R', 0), mg.get('PD', 0)
+        entry_w = 0
+        if r:
+            entry_w += len(f'▶{r}')
+        if p:
+            entry_w += len(f' ⏸{p}') if r else len(f'⏸{p}')
+        w_my = max(w_my, entry_w + 2)
+
+    col_widths = {
+        'model': w_model, 'vram': w_vram, 'bar': 14,
+        'cnt': w_cnt, 'dem': w_dem, 'my': w_my,
+    }
+
     # Build model lines
     has_any_trend = bool(trends)
     model_lines = []
@@ -494,9 +521,11 @@ def build_panel(stats: Dict[str, Dict], my_gpus: Dict,
         model_lines.append(_build_model_line(m, d, pending, my_gpus, show_nodes,
                                              trend=trends.get(m),
                                              w_nodes=max_node_w,
-                                             has_any_trend=has_any_trend))
+                                             has_any_trend=has_any_trend,
+                                             col_widths=col_widths))
 
-    # Arrange into columns
+    # Arrange into columns — use actual max line width for padding
+    actual_line_w = max((_display_width(ml.plain) for ml in model_lines), default=40)
     rows_per_col = (n + n_cols - 1) // n_cols
     sep = Text('  │ ', style='bright_black')
 
@@ -509,15 +538,12 @@ def build_panel(stats: Dict[str, Dict], my_gpus: Dict,
                 line.append_text(sep)
             if idx < n:
                 ml = model_lines[idx]
-                # Pad to fixed width for alignment across columns
-                target_w = col_w_nodes if show_nodes else col_w_compact
-                pad = max(0, target_w - len(ml.plain))
+                pad = max(0, actual_line_w - _display_width(ml.plain))
                 line.append_text(ml)
                 if pad > 0:
                     line.append(' ' * pad)
             else:
-                target_w = col_w_nodes if show_nodes else col_w_compact
-                line.append(' ' * target_w)
+                line.append(' ' * actual_line_w)
         output_lines.append(line)
 
     # Total row with dark gray background spanning full width
@@ -530,11 +556,11 @@ def build_panel(stats: Dict[str, Dict], my_gpus: Dict,
     tcnt = Text()
     tcnt.append(f'{total_T - total_U}', style=f'bold {uc} {bg}')
     tcnt.append(f'/{total_T}', style=f'bright_black {bg}')
-    total_line.append_text(_col(tname, 8))    # W_MODEL
-    total_line.append_text(_col(Text('', style=bg), 4))  # W_VRAM
+    total_line.append_text(_col(tname, col_widths['model']))
+    total_line.append_text(_col(Text('', style=bg), col_widths['vram']))
     total_line.append_text(_col(Text(_usage_emoji(total_pct * 100), style=bg), 4))
-    total_line.append_text(_bar(total_U, total_T, 14))
-    total_line.append_text(_col(tcnt, 5))
+    total_line.append_text(_bar(total_U, total_T, col_widths['bar']))
+    total_line.append_text(_col(tcnt, col_widths['cnt']))
     total_my_r = sum(v.get('R', 0) for v in my_gpus.values())
     total_my_pd = sum(v.get('PD', 0) for v in my_gpus.values())
     # Measure full row width from model lines (which include │ + my-jobs)
