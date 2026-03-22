@@ -455,8 +455,10 @@ def build_panel(stats: Dict[str, Dict], my_gpus: Dict,
     has_any_trend = bool(trends)
 
     # Build table
-    table = RichTable(show_header=False, show_edge=False, box=None,
-                      pad_edge=False, padding=(0, 1, 0, 0))
+    from rich.box import HORIZONTALS
+    table = RichTable(show_header=False, show_edge=False, box=HORIZONTALS,
+                      pad_edge=False, padding=(0, 1, 0, 0),
+                      show_lines=False)
     table.add_column('model', style='bold', no_wrap=True)
     table.add_column('vram', style='bright_black', no_wrap=True)
     table.add_column('emoji', no_wrap=True, width=2)
@@ -519,16 +521,15 @@ def build_panel(stats: Dict[str, Dict], my_gpus: Dict,
             row.append(trend_t)
         row.append(Text('│', style='bright_black'))
         row.append(my_t)
-        table.add_row(*row)
+        table.add_row(*row, end_section=(m == models[-1]))
 
-    # Total row
+    # Total row (separated by line above via end_section)
     total_pct = total_U / total_T if total_T else 0.0
     uc = _util_color(total_pct)
-    bg = 'on #2a2a2a'
     total_emoji = _usage_emoji(total_pct * 100)
     tcnt = Text()
-    tcnt.append(f'{total_T - total_U}', style=f'bold {uc} {bg}')
-    tcnt.append(f'/{total_T}', style=f'bright_black {bg}')
+    tcnt.append(f'{total_T - total_U}', style=f'bold {uc}')
+    tcnt.append(f'/{total_T}', style='bright_black')
     total_my_r = sum(v.get('R', 0) for v in my_gpus.values())
     total_my_pd = sum(v.get('PD', 0) for v in my_gpus.values())
     my_total = Text()
@@ -539,15 +540,15 @@ def build_panel(stats: Dict[str, Dict], my_gpus: Dict,
             my_total.append(' ')
         my_total.append(f'⏸{total_my_pd}', style='bold yellow')
     total_row = [
-        Text('Total', style=f'bold {uc} {bg}'),
-        Text('', style=bg),
-        Text(total_emoji if total_emoji else '', style=bg),
+        Text('Total', style=f'bold {uc}'),
+        Text(''),
+        Text(total_emoji if total_emoji else ''),
         _bar(total_U, total_T, 14),
         tcnt,
-        Text('', style=bg),
+        Text(''),
     ]
     if has_any_trend:
-        total_row.append(Text('', style=bg))
+        total_row.append(Text(''))
     total_row.append(Text('│', style='bright_black'))
     total_row.append(my_total)
     table.add_row(*total_row)
