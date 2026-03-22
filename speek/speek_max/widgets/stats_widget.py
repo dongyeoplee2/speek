@@ -480,36 +480,37 @@ class StatsWidget(Widget):
             yield Button('Apply', id='stats-cust-apply',
                          classes='stats-apply-btn')
 
-        # ── now dashboard ─────────────────────────────────────────────────────
-        yield Static('', id='stats-dashboard', markup=True)
+        with VerticalScroll(id='stats-scroll'):
+            # ── now dashboard ────────────────────────────────────────────────
+            yield Static('', id='stats-dashboard', markup=True)
 
-        # ── chart area ────────────────────────────────────────────────────────
-        with Vertical(id='stats-chart-area'):
-            with Horizontal(id='stats-chart-header'):
-                yield Static('', id='stats-chart-title', markup=True)
-                yield Static('', id='stats-y-max', markup=True)
-            with Horizontal(id='stats-chart-body'):
-                yield Static('', id='stats-y-axis')
-                with Vertical(id='stats-chart-inner'):
-                    yield Sparkline([], id='stats-sparkline', summary_function=max)
-                    yield Static('', id='stats-x-axis')
-                    yield Static('', id='stats-hover-info', markup=True)
+            # ── chart area ───────────────────────────────────────────────────
+            with Vertical(id='stats-chart-area'):
+                with Horizontal(id='stats-chart-header'):
+                    yield Static('', id='stats-chart-title', markup=True)
+                    yield Static('', id='stats-y-max', markup=True)
+                with Horizontal(id='stats-chart-body'):
+                    yield Static('', id='stats-y-axis')
+                    with Vertical(id='stats-chart-inner'):
+                        yield Sparkline([], id='stats-sparkline', summary_function=max)
+                        yield Static('', id='stats-x-axis')
+                        yield Static('', id='stats-hover-info', markup=True)
 
-        # ── summary bar ───────────────────────────────────────────────────────
-        with Horizontal(id='stats-summary'):
-            yield Label('', id='stats-lbl-total',   markup=True)
-            yield Label('', id='stats-lbl-peak',    markup=True)
-            yield Label('', id='stats-lbl-jobs',    markup=True)
-            yield Label('', id='stats-lbl-loading', markup=True)
+            # ── summary bar ──────────────────────────────────────────────────
+            with Horizontal(id='stats-summary'):
+                yield Label('', id='stats-lbl-total',   markup=True)
+                yield Label('', id='stats-lbl-peak',    markup=True)
+                yield Label('', id='stats-lbl-jobs',    markup=True)
+                yield Label('', id='stats-lbl-loading', markup=True)
 
-        # ── per-group sparklines (scrollable) ────────────────────────────────
-        with VerticalScroll(id='stats-breakdown-scroll'):
-            pass  # populated dynamically
+            # ── per-group sparklines ─────────────────────────────────────────
+            with Vertical(id='stats-breakdown-scroll'):
+                pass  # populated dynamically
 
-        # ── issue stats (chart + table) ───────────────────────────────────────
-        with Vertical(id='stats-issues'):
-            yield Static('', id='stats-issue-chart', markup=True)
-            yield Static('', id='stats-issue-table', markup=True)
+            # ── issue stats (chart + table) ──────────────────────────────────
+            with Vertical(id='stats-issues'):
+                yield Static('', id='stats-issue-chart', markup=True)
+                yield Static('', id='stats-issue-table', markup=True)
 
     def on_mount(self) -> None:
         self._w_sparkline = self.query_one(_SPARKLINE_ID, Sparkline)

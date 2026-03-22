@@ -1226,11 +1226,24 @@ StatsWidget {
   background: $background;
 }
 
-#stats-breakdown-scroll {
+#stats-scroll {
   height: 1fr;
   width: 1fr;
   background: $background;
+}
+
+#stats-breakdown-scroll {
+  height: auto;
+  width: 1fr;
+  background: $background;
   border-top: solid $accent 40%;
+}
+
+#stats-dashboard {
+  height: auto;
+  width: 1fr;
+  padding: 0 1;
+  background: $background;
 }
 
 .stats-group-row {
