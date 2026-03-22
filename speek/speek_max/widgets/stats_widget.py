@@ -54,7 +54,7 @@ def _render_stacked_chart(per_group_ts: Dict, peak: float, n_buckets: int) -> Te
     )
     user_color = {u: _USER_COLORS[i % len(_USER_COLORS)] for i, u in enumerate(users)}
 
-    height = 4  # rows of block characters
+    height = 8  # rows of block characters — matches sparkline visual height
     lines: List[Text] = []
 
     for row in range(height - 1, -1, -1):  # top row first
@@ -734,24 +734,30 @@ class StatsWidget(Widget):
         # sparkline + y-max label
         is_user_dim = self._dim == 'user' and per_group
         try:
-            # Always show sparkline, hide stacked chart
-            self.query_one(_SPARKLINE_ID, Sparkline).data = ts['buckets']
-            self.query_one(_SPARKLINE_ID, Sparkline).display = True
-            try:
-                self.query_one(_STACKED_ID).display = False
-            except Exception:
-                pass
+            from io import StringIO
+            from rich.console import Console as _RCon
 
             if is_user_dim:
-                from io import StringIO
-                from rich.console import Console as _RCon
-                legend = _build_user_legend(per_group)
+                # Show stacked colored chart, hide sparkline
+                self.query_one(_SPARKLINE_ID, Sparkline).display = False
+                peak = ts.get('peak', 0)
+                _, n_buckets_cfg, _ = _RANGES.get(self._range_key, _RANGES['7d'])
+                chart_text = _render_stacked_chart(per_group, peak, n_buckets_cfg)
                 buf = StringIO()
-                _RCon(file=buf, force_terminal=True, width=200, no_color=False).print(legend, end='')
-                self.query_one(_LEGEND_ID, Static).update(buf.getvalue())
+                _RCon(file=buf, force_terminal=True, width=200, no_color=False).print(chart_text, end='')
+                self.query_one(_STACKED_ID, Static).update(buf.getvalue())
+                self.query_one(_STACKED_ID).display = True
+                legend = _build_user_legend(per_group)
+                buf2 = StringIO()
+                _RCon(file=buf2, force_terminal=True, width=200, no_color=False).print(legend, end='')
+                self.query_one(_LEGEND_ID, Static).update(buf2.getvalue())
                 self.query_one(_LEGEND_ID).display = True
             else:
+                # Show sparkline, hide stacked chart
+                self.query_one(_SPARKLINE_ID, Sparkline).data = ts['buckets']
+                self.query_one(_SPARKLINE_ID, Sparkline).display = True
                 try:
+                    self.query_one(_STACKED_ID).display = False
                     self.query_one(_LEGEND_ID).display = False
                 except Exception:
                     pass
