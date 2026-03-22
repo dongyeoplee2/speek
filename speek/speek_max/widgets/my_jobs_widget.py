@@ -1240,12 +1240,14 @@ class MyJobsWidget(FoldableTableMixin, Widget):
     # ── History tab ────────────────────────────────────────────────────────
 
     def _load_history(self) -> None:
-        if not getattr(self.app, '_cmd_sacct', True):
-            return
         days = getattr(self.app, '_history_lookback_days', 7)
 
         def _worker():
-            rows = fetch_history(days)
+            if not getattr(self.app, '_cmd_sacct', True):
+                from speek.speek_max.event_watcher import load_fallback_history
+                rows = load_fallback_history(user=self.user, days=days)
+            else:
+                rows = fetch_history(days)
             self.app.call_from_thread(self._populate_history, rows)
 
         self.run_worker(_worker, thread=True, exclusive=True, group='myjobs-hist')

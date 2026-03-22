@@ -602,12 +602,15 @@ class HistoryWidget(FoldableTableMixin, Widget):
 
     def _load(self) -> None:
         if not getattr(self.app, '_cmd_sacct', True):
-            try:
-                for dt_id in _DT_IDS.values():
-                    self.query_one(f'#{dt_id}', SpeekDataTable).display = False
-                self.border_subtitle = '[dim]sacct unavailable[/dim]'
-            except Exception:
-                pass
+            # Fallback: use squeue-based transition history
+            from speek.speek_max.event_watcher import load_fallback_history
+            days = self.lookback_days
+            self.border_subtitle = '[dim]sacct unavailable — limited history[/dim]'
+            self.run_worker(
+                lambda: load_fallback_history(
+                    user=getattr(self.app, 'user', ''), days=days),
+                thread=True, exclusive=True, group='history',
+            )
             return
         if not getattr(self.app, '_feat_history', True):
             return
