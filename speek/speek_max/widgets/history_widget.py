@@ -370,9 +370,10 @@ class FullHistoryModal(SpeekModal):
         c_secondary = tc(tv, 'text-secondary', 'default')
 
         state_style = self._state_style_fn(tv)
+        sorted_groups = sorted(self._groups, key=lambda g: g.get('start', ''), reverse=True)
         current_date = ''
         div_counter = 0
-        for g in self._groups:
+        for g in sorted_groups:
             dk = _date_key(g['start'])
             if dk != current_date:
                 if current_date:  # spacer before divider (skip first)
@@ -826,6 +827,8 @@ class HistoryWidget(FoldableTableMixin, Widget):
     def _build_tree(self, groups: List[dict]) -> List[TreeNode]:
         """Build tree: Divider (time zones) -> event groups (FoldGroup if count > 1, else Leaf)
         -> individual events (Leaf)."""
+        # Sort by start date descending (most recent first) so date dividers don't alternate
+        groups = sorted(groups, key=lambda g: g.get('start', ''), reverse=True)
         tree: List[TreeNode] = []
         current_date = ''
         div_counter = 0
