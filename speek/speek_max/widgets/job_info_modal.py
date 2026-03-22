@@ -644,6 +644,18 @@ class JobInfoModal(SpeekModal):
                 result['priority'] = fetch_priority_data(job_id, user)
             except Exception:
                 pass
+            # Detailed priority factor breakdown
+            try:
+                from speek.speek_max.slurm import fetch_priority_factors
+                result['priority_factors'] = fetch_priority_factors(job_id)
+            except Exception:
+                pass
+            # User fairshare details
+            try:
+                from speek.speek_max.slurm import fetch_user_share
+                result['user_share'] = fetch_user_share(user)
+            except Exception:
+                pass
             result['reason'] = details.get('Reason', '')
 
         elif state in ('FAILED', 'TIMEOUT', 'OUT_OF_MEMORY'):
@@ -700,6 +712,70 @@ class JobInfoModal(SpeekModal):
 
         return result
 
+    @staticmethod
+    def _render_priority_breakdown(
+        pf: Optional[Dict], us: Optional[Dict], tv: Dict,
+    ) -> List[str]:
+        """Build markup lines for a detailed priority factor breakdown."""
+        from speek.speek_max._utils import tc
+        c_muted = tc(tv, 'text-muted', 'bright_black')
+        c_warning = tc(tv, 'text-warning', 'yellow')
+
+        lines: List[str] = ['', f'[bold {c_warning}]── Priority Breakdown ──[/]']
+
+        if pf:
+            lines.extend(JobInfoModal._fmt_priority_factors(pf, c_muted))
+        if us:
+            lines.extend(JobInfoModal._fmt_user_share(us, tv))
+
+        return lines
+
+    @staticmethod
+    def _fmt_priority_factors(pf: Dict, c_muted: str) -> List[str]:
+        """Format priority factor components into markup lines."""
+        lines: List[str] = []
+        total = float(pf.get('total', 0) or 0)
+        lines.append(f'  [bold]Priority:[/bold]  {total:.0f}')
+        for comp in pf.get('components', []):
+            name = comp.get('name', '?')
+            value = float(comp.get('value', 0) or 0)
+            pct = (value / total * 100) if total else 0
+            detail = comp.get('detail', '')
+            pct_str = f'({pct:3.0f}%)' if total else ''
+            line = f'  {name:<10} {value:>5.0f}  {pct_str}'
+            if detail:
+                line += f'  [{c_muted}]-- {detail}[/]'
+            lines.append(line)
+        queue_info = pf.get('queue_position')
+        if queue_info:
+            lines.extend(['', f'  [{c_muted}]{queue_info}[/]'])
+        return lines
+
+    @staticmethod
+    def _fmt_user_share(us: Dict, tv: Dict) -> List[str]:
+        """Format user share info into markup lines."""
+        from speek.speek_max._utils import tc
+        c_muted = tc(tv, 'text-muted', 'bright_black')
+        c_success = tc(tv, 'text-success', 'green')
+        c_warning = tc(tv, 'text-warning', 'yellow')
+        c_error = tc(tv, 'text-error', 'red')
+
+        lines: List[str] = ['']
+        fs = us.get('fairshare')
+        if fs is not None:
+            if fs >= 0.5:
+                fs_color = c_success
+            elif fs >= 0.2:
+                fs_color = c_warning
+            else:
+                fs_color = c_error
+            lines.append(f'  [bold]Your usage:[/bold]  [{fs_color}]{fs:.3f} fairshare[/]')
+        eff = us.get('effective_usage')
+        alloc = us.get('fair_allocation')
+        if eff is not None and alloc is not None:
+            lines.append(f'  [{c_muted}]{eff:.1f}% effective vs {alloc:.1f}% share[/]')
+        return lines
+
     def _render_analysis(self, data: Dict) -> None:
         from speek.speek_max._utils import tc
         tv = self.app.theme_variables
@@ -718,17 +794,24 @@ class JobInfoModal(SpeekModal):
                 lines.append(f'  [bold]Reason:[/bold]  {reason}')
             else:
                 lines.append(f'  [{c_muted}]No reason reported[/]')
-            # Priority scores
-            prio = data.get('priority')
-            if prio:
-                from speek.speek_max.widgets.priority_widget import build_priority_renderable
-                try:
-                    self.query_one('#ji-priority-content', Static).update(
-                        build_priority_renderable(prio, tv)
-                    )
-                    return
-                except Exception:
-                    pass
+
+            # Detailed priority factor breakdown
+            pf = data.get('priority_factors')
+            us = data.get('user_share')
+            if pf or us:
+                lines.extend(self._render_priority_breakdown(pf, us, tv))
+            else:
+                # Fall back to legacy priority renderable
+                prio = data.get('priority')
+                if prio:
+                    from speek.speek_max.widgets.priority_widget import build_priority_renderable
+                    try:
+                        self.query_one('#ji-priority-content', Static).update(
+                            build_priority_renderable(prio, tv)
+                        )
+                        return
+                    except Exception:
+                        pass
 
         elif state in ('FAILED', 'TIMEOUT', 'OUT_OF_MEMORY'):
             label = {'FAILED': 'Failure', 'TIMEOUT': 'Timeout', 'OUT_OF_MEMORY': 'OOM'}

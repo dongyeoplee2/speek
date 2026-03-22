@@ -1780,3 +1780,336 @@ def get_partitions() -> List[str]:
         return sorted({p.strip().rstrip('*') for p in out.splitlines() if p.strip()})
     except Exception:
         return []
+
+
+# ── Priority / scheduling factor helpers ──────────────────────────────────────
+
+_priority_config_cache: Optional[Tuple[float, Dict]] = None
+_priority_config_lock = _threading.Lock()
+_PRIORITY_CONFIG_TTL = 300.0  # seconds — config rarely changes
+
+_priority_factors_cache: Optional[Tuple[float, List]] = None
+_priority_factors_lock = _threading.Lock()
+_PRIORITY_FACTORS_TTL = 30.0
+
+_user_share_cache: Dict[str, Tuple[float, Dict]] = {}
+_user_share_lock = _threading.Lock()
+_USER_SHARE_TTL = 60.0
+
+_all_shares_cache: Optional[Tuple[float, Dict]] = None
+_all_shares_lock = _threading.Lock()
+_ALL_SHARES_TTL = 60.0
+
+
+def fetch_priority_config() -> Dict:
+    """Parse ``scontrol show config`` for priority-related settings.
+
+    Returns a dict with keys: type, weights, decay_half_life, max_age,
+    calc_period, usage_reset, favor_small, dampening_factor.
+    Cached for 300 seconds.
+    """
+    global _priority_config_cache
+    now = _time.monotonic()
+    with _priority_config_lock:
+        if _priority_config_cache is not None and now - _priority_config_cache[0] < _PRIORITY_CONFIG_TTL:
+            return _priority_config_cache[1]
+
+    defaults: Dict = {
+        'type': 'unknown',
+        'weights': {
+            'Age': 0, 'Assoc': 0, 'FairShare': 0,
+            'JobSize': 0, 'Partition': 0, 'QOS': 0, 'TRES': None,
+        },
+        'decay_half_life': 'NONE',
+        'max_age': 'NONE',
+        'calc_period': 'NONE',
+        'usage_reset': 'NONE',
+        'favor_small': False,
+        'dampening_factor': 1,
+    }
+
+    try:
+        out = subprocess.check_output(
+            ['scontrol', 'show', 'config'],
+            text=True, stderr=subprocess.DEVNULL, timeout=10,
+        )
+    except Exception:
+        return defaults
+
+    cfg: Dict[str, str] = {}
+    for ln in out.splitlines():
+        if '=' not in ln:
+            continue
+        key, _, val = ln.partition('=')
+        cfg[key.strip()] = val.strip()
+
+    result = dict(defaults)
+
+    result['type'] = cfg.get('PriorityType', 'unknown').replace('priority/', '')
+
+    # Weight fields
+    weight_map = {
+        'PriorityWeightAge':       'Age',
+        'PriorityWeightAssoc':     'Assoc',
+        'PriorityWeightFairshare': 'FairShare',
+        'PriorityWeightFairShare': 'FairShare',
+        'PriorityWeightJobSize':   'JobSize',
+        'PriorityWeightPartition': 'Partition',
+        'PriorityWeightQOS':       'QOS',
+        'PriorityWeightTRES':      'TRES',
+    }
+    weights = dict(defaults['weights'])
+    for cfg_key, w_name in weight_map.items():
+        raw = cfg.get(cfg_key, '').strip()
+        if not raw or raw.upper() == 'NONE' or raw == '(null)':
+            if w_name == 'TRES':
+                weights[w_name] = None
+            continue
+        try:
+            weights[w_name] = int(raw)
+        except ValueError:
+            # TRES weights can be a comma-separated string like "cpu=1000,mem=500"
+            if w_name == 'TRES':
+                weights[w_name] = raw
+    result['weights'] = weights
+
+    result['decay_half_life'] = cfg.get('PriorityDecayHalfLife', 'NONE')
+    result['max_age'] = cfg.get('PriorityMaxAge', 'NONE')
+    result['calc_period'] = cfg.get('PriorityCalcPeriod', 'NONE')
+    result['usage_reset'] = cfg.get('PriorityUsageResetPeriod', cfg.get('PriorityUsageReset', 'NONE'))
+    result['favor_small'] = cfg.get('PriorityFavorSmall', 'NO').upper() in ('YES', '1', 'TRUE')
+
+    try:
+        result['dampening_factor'] = int(cfg.get('PriorityFavorSmall', '1').split()[0]) if False else int(cfg.get('FairShareDampeningFactor', '1'))
+    except ValueError:
+        result['dampening_factor'] = 1
+
+    with _priority_config_lock:
+        _priority_config_cache = (_time.monotonic(), result)
+    return result
+
+
+def fetch_priority_factors(job_id: str = '') -> List[Dict]:
+    """Parse ``sprio`` output for pending job priority factors.
+
+    If *job_id* is given, filters to that specific job.  Otherwise returns
+    all pending jobs.  Cached for 30 seconds (full list only).
+
+    Handles varying column counts across SLURM versions by parsing
+    the header line to determine column mapping.
+    """
+    global _priority_factors_cache
+
+    # Use cache only for the "all jobs" query
+    if not job_id:
+        now = _time.monotonic()
+        with _priority_factors_lock:
+            if _priority_factors_cache is not None and now - _priority_factors_cache[0] < _PRIORITY_FACTORS_TTL:
+                return _priority_factors_cache[1]
+
+    cmd = ['sprio', '-l', '--parsable2']
+    if job_id:
+        cmd.extend(['-j', job_id])
+
+    try:
+        out = subprocess.check_output(
+            cmd, text=True, stderr=subprocess.DEVNULL, timeout=10,
+        )
+    except Exception:
+        return []
+
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    if not lines:
+        return []
+
+    # First line is the header — use it to build column mapping
+    header_parts = [h.strip().upper() for h in lines[0].split('|')]
+
+    # Map known header names to our dict keys
+    header_key_map = {
+        'JOBID': 'jid',
+        'JOB_ID': 'jid',
+        'USER': 'user',
+        'PRIORITY': 'priority',
+        'AGE': 'age',
+        'ASSOC': 'assoc',
+        'FAIRSHARE': 'fairshare',
+        'JOBSIZE': 'jobsize',
+        'NICE': 'nice',
+        'PARTITION': 'partition',
+        'QOS': 'qos',
+        'TRES': 'tres',
+        'SITE': 'site',
+    }
+
+    col_map: List[Tuple[int, str]] = []
+    for idx, hdr in enumerate(header_parts):
+        key = header_key_map.get(hdr)
+        if key:
+            col_map.append((idx, key))
+
+    if not col_map:
+        return []
+
+    # Numeric fields that should be parsed as numbers
+    numeric_fields = {'priority', 'age', 'assoc', 'fairshare', 'jobsize', 'nice', 'partition', 'qos', 'tres', 'site'}
+
+    result: List[Dict] = []
+    for ln in lines[1:]:
+        parts = ln.split('|')
+        row: Dict = {
+            'jid': '', 'user': '', 'priority': 0, 'age': 0, 'assoc': 0,
+            'fairshare': 0, 'jobsize': 0, 'nice': 0, 'partition': 0,
+            'qos': 0, 'tres': 0,
+        }
+        for idx, key in col_map:
+            if idx >= len(parts):
+                continue
+            val = parts[idx].strip()
+            if key in numeric_fields:
+                try:
+                    row[key] = float(val) if '.' in val else int(val)
+                except (ValueError, TypeError):
+                    row[key] = 0
+            else:
+                row[key] = val
+        result.append(row)
+
+    if not job_id:
+        with _priority_factors_lock:
+            _priority_factors_cache = (_time.monotonic(), result)
+    return result
+
+
+def _parse_sshare_line(parts: List[str]) -> Optional[Dict]:
+    """Parse a single line of sshare --parsable2 output into a dict."""
+    # Typical fields: Account|User|RawShares|NormShares|RawUsage|EffectiveUsage|FairShare
+    # Some versions add more columns; we handle >= 7 gracefully.
+    if len(parts) < 7:
+        return None
+    try:
+        return {
+            'account': parts[0].strip(),
+            'user': parts[1].strip(),
+            'raw_shares': int(parts[2].strip()) if parts[2].strip().isdigit() else parts[2].strip(),
+            'norm_shares': float(parts[3].strip()) if parts[3].strip() not in ('', 'inf') else 0.0,
+            'raw_usage': int(parts[4].strip()) if parts[4].strip().isdigit() else 0,
+            'effective_usage': float(parts[5].strip()) if parts[5].strip() not in ('', 'inf') else 0.0,
+            'fairshare': float(parts[6].strip()) if parts[6].strip() not in ('', 'inf') else 0.0,
+        }
+    except (ValueError, IndexError):
+        return None
+
+
+def fetch_user_share(user: str = '') -> Dict:
+    """Parse ``sshare`` for a specific user's share/fairshare data.
+
+    If *user* is empty, returns ``{username: share_dict}`` for all users.
+    Cached per-user for 60 seconds.
+    """
+    if not user:
+        return fetch_all_shares()
+
+    now = _time.monotonic()
+    with _user_share_lock:
+        cached = _user_share_cache.get(user)
+        if cached is not None and now - cached[0] < _USER_SHARE_TTL:
+            return cached[1]
+
+    try:
+        out = subprocess.check_output(
+            ['sshare', '-u', user, '--parsable2', '--noheader'],
+            text=True, stderr=subprocess.DEVNULL, timeout=10,
+        )
+    except Exception:
+        return {}
+
+    result: Dict = {}
+    for ln in out.splitlines():
+        if not ln.strip():
+            continue
+        parts = ln.split('|')
+        parsed = _parse_sshare_line(parts)
+        if parsed and parsed['user']:
+            result = {k: v for k, v in parsed.items() if k != 'user'}
+            break  # Return first matching row for this user
+
+    with _user_share_lock:
+        _user_share_cache[user] = (_time.monotonic(), result)
+    return result
+
+
+def fetch_all_shares() -> Dict[str, Dict]:
+    """Return ``{username: share_dict}`` for all users via ``sshare -a``.
+
+    Cached for 60 seconds.
+    """
+    global _all_shares_cache
+    now = _time.monotonic()
+    with _all_shares_lock:
+        if _all_shares_cache is not None and now - _all_shares_cache[0] < _ALL_SHARES_TTL:
+            return _all_shares_cache[1]
+
+    try:
+        out = subprocess.check_output(
+            ['sshare', '-a', '--parsable2', '--noheader'],
+            text=True, stderr=subprocess.DEVNULL, timeout=10,
+        )
+    except Exception:
+        return {}
+
+    result: Dict[str, Dict] = {}
+    for ln in out.splitlines():
+        if not ln.strip():
+            continue
+        parts = ln.split('|')
+        parsed = _parse_sshare_line(parts)
+        if parsed and parsed['user']:
+            username = parsed['user']
+            result[username] = {k: v for k, v in parsed.items() if k != 'user'}
+
+    with _all_shares_lock:
+        _all_shares_cache = (_time.monotonic(), result)
+    return result
+
+
+def describe_priority_factors(config: Dict) -> List[Tuple[str, str, str]]:
+    """Return human-readable descriptions of each priority factor.
+
+    Each tuple is ``(factor_name, weight_str, description)``.
+    Active factors (weight > 0) get descriptive text; disabled factors
+    are labelled accordingly.  Uses *config* from :func:`fetch_priority_config`.
+    """
+    weights = config.get('weights', {})
+    max_age = config.get('max_age', 'NONE')
+
+    descriptions = {
+        'FairShare': f'Past usage vs allocation — lower usage = higher priority',
+        'Age': f'Wait time bonus — grows linearly over {max_age}' if max_age != 'NONE' else 'Wait time bonus — grows linearly',
+        'QOS': 'Quality of service class modifier',
+        'Assoc': 'Account/association hierarchy modifier',
+        'JobSize': 'Favor small jobs bonus' if config.get('favor_small') else 'Favor large jobs bonus',
+        'Partition': 'Per-partition priority modifier',
+        'TRES': 'Trackable resource-based priority',
+    }
+
+    result: List[Tuple[str, str, str]] = []
+
+    # Sort: active factors first (by weight descending), then disabled
+    factor_order = sorted(
+        descriptions.keys(),
+        key=lambda f: (
+            0 if (weights.get(f) is not None and weights.get(f) != 0) else 1,
+            -(weights.get(f, 0) if isinstance(weights.get(f), (int, float)) else 0),
+        ),
+    )
+
+    for factor in factor_order:
+        w = weights.get(factor, 0)
+        w_str = str(w) if w is not None else 'None'
+        desc = descriptions[factor]
+        if w is None or w == 0:
+            desc += ' (disabled)'
+        result.append((factor, w_str, desc))
+
+    return result

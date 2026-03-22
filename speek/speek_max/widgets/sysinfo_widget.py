@@ -132,7 +132,8 @@ class SysInfoWidget(Widget):
     .si-age  { color: $text-muted; height: 1; }
     """
 
-    _SI_SECTIONS = ['cluster', 'gpu', 'commands', 'sacct', 'missing', 'cache']
+    _SI_SECTIONS = ['cluster', 'gpu', 'commands', 'sacct', 'missing',
+                     'priority', 'myshare', 'cache']
 
     def compose(self) -> ComposeResult:
         with VerticalScroll():
@@ -290,8 +291,141 @@ class SysInfoWidget(Widget):
             f'({time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))})[/]'
         )
 
+        # ── Scheduling Factors ─────────────────────────────────────────────
+        self._render_priority_section(tv)
+
+        # ── My Scheduling State ───────────────────────────────────────────
+        self._render_myshare_section(tv)
+
         # ── Cache info ─────────────────────────────────────────────────────
         self._render_cache_info()
+
+    def _render_priority_section(self, tv: dict) -> None:
+        """Render the Scheduling Factors section using fetch_priority_config."""
+        self.query_one('#si-header-priority', Label).update('── Scheduling Factors ──')
+        # Load in background since it runs subprocess
+        self.run_worker(self._fetch_and_render_priority, thread=True, group='si-priority')
+
+    def _fetch_and_render_priority(self) -> None:
+        try:
+            from speek.speek_max.slurm import fetch_priority_config, describe_priority_factors
+            config = fetch_priority_config()
+            factors = describe_priority_factors(config)
+        except Exception:
+            config = None
+            factors = None
+        self.app.call_from_thread(self._apply_priority_section, config, factors)
+
+    def _apply_priority_section(self, config: dict | None, factors: list | None) -> None:
+        from speek.speek_max._utils import tc
+        tv = self.app.theme_variables
+        c_muted = tc(tv, 'text-muted', 'bright_black')
+
+        if factors is None:
+            self.query_one('#si-priority', Static).update(
+                f'[{c_muted}]Priority config unavailable (sprio/scontrol not available)[/]'
+            )
+            return
+
+        table = RichTable(show_header=True, show_edge=False, box=None,
+                          pad_edge=False, padding=(0, 1, 0, 0))
+        table.add_column('Factor', style='bold', no_wrap=True, min_width=12)
+        table.add_column('Weight', justify='right', min_width=6)
+        table.add_column('Description', style='dim')
+
+        for f in factors:
+            name = f.get('name', '—')
+            weight = str(f.get('weight', 0))
+            desc = f.get('description', '')
+            if f.get('weight', 0) == 0:
+                table.add_row(f'[dim]{name}[/dim]', f'[dim]{weight}[/dim]',
+                              f'[dim](disabled)[/dim]')
+            else:
+                table.add_row(name, weight, desc)
+
+        # Append config metadata
+        if config:
+            decay = config.get('decay_half_life', '—')
+            max_age = config.get('max_age', '—')
+            reset = config.get('usage_reset', 'never')
+            table.add_row('', '', '')
+            table.add_row(f'[{c_muted}]Decay half-life[/]', '', f'[{c_muted}]{decay}[/]')
+            table.add_row(f'[{c_muted}]Max age bonus[/]', '', f'[{c_muted}]{max_age}[/]')
+            table.add_row(f'[{c_muted}]Usage reset[/]', '', f'[{c_muted}]{reset}[/]')
+
+        try:
+            self.query_one('#si-priority', Static).update(table)
+        except Exception:
+            pass
+
+    def _render_myshare_section(self, tv: dict) -> None:
+        """Render the My Scheduling State section using fetch_user_share."""
+        self.query_one('#si-header-myshare', Label).update('── My Scheduling State ──')
+        # Load in background since it runs subprocess
+        self.run_worker(self._fetch_and_render_myshare, thread=True, group='si-myshare')
+
+    def _fetch_and_render_myshare(self) -> None:
+        try:
+            from speek.speek_max.slurm import fetch_user_share
+            user = getattr(self.app, 'user', '')
+            share = fetch_user_share(user)
+        except Exception:
+            share = None
+        self.app.call_from_thread(self._apply_myshare_section, share)
+
+    def _apply_myshare_section(self, share: dict | None) -> None:
+        from speek.speek_max._utils import tc
+        tv = self.app.theme_variables
+        c_muted = tc(tv, 'text-muted', 'bright_black')
+        c_success = tc(tv, 'text-success', 'green')
+        c_warning = tc(tv, 'text-warning', 'yellow')
+        c_error = tc(tv, 'text-error', 'red')
+
+        if share is None:
+            self.query_one('#si-myshare', Static).update(
+                f'[{c_muted}]Scheduling state unavailable (sshare not available)[/]'
+            )
+            return
+
+        fs = share.get('fairshare', None)
+        eff_usage = share.get('effective_usage', None)
+        fair_alloc = share.get('fair_allocation', None)
+        usage_ratio = share.get('usage_ratio', None)
+        recovery = share.get('recovery_estimate', None)
+
+        rows: list[tuple[str, str]] = []
+
+        if fs is not None:
+            fs_color = c_success if fs >= 0.5 else c_warning if fs >= 0.2 else c_error
+            rows.append(('Fairshare score', f'[{fs_color}]{fs:.3f}[/]'))
+        else:
+            rows.append(('Fairshare score', f'[{c_muted}]—[/]'))
+
+        if eff_usage is not None:
+            rows.append(('Effective usage', f'{eff_usage:.1f}%'))
+        else:
+            rows.append(('Effective usage', f'[{c_muted}]—[/]'))
+
+        if fair_alloc is not None:
+            rows.append(('Fair allocation', f'{fair_alloc:.1f}%'))
+        else:
+            rows.append(('Fair allocation', f'[{c_muted}]—[/]'))
+
+        if usage_ratio is not None:
+            ratio_color = c_error if usage_ratio > 2.0 else c_warning if usage_ratio > 1.0 else c_success
+            rows.append(('Usage ratio', f'[{ratio_color}]{usage_ratio:.1f}x your share[/]'))
+        else:
+            rows.append(('Usage ratio', f'[{c_muted}]—[/]'))
+
+        if recovery is not None:
+            rows.append(('Recovery estimate', f'[{c_muted}]{recovery}[/]'))
+        else:
+            rows.append(('Recovery estimate', f'[{c_muted}]—[/]'))
+
+        try:
+            self.query_one('#si-myshare', Static).update(_kv_table(rows))
+        except Exception:
+            pass
 
     def _render_cache_info(self) -> None:
         tv = self.app.theme_variables
