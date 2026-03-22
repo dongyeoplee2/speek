@@ -39,10 +39,10 @@ def _run(cmd: list[str]) -> str:
 
 
 def _usage_emoji(pct: float) -> str:
-    if pct >= 100: return '■'   # full block — fully saturated
-    if pct > 90:   return '▲'   # warning triangle — near capacity
-    if pct == 0:   return '○'   # empty circle — idle
-    if pct < 10:   return '◇'   # diamond — nearly idle
+    if pct >= 100: return '💀'
+    if pct > 90:   return '🔥'
+    if pct == 0:   return '🏖'
+    if pct < 10:   return '❄️'
     return ''
 
 
@@ -345,7 +345,8 @@ def _build_model_line(m: str, d: Dict, pending: Dict, my_gpus: Dict,
                       trend: Tuple[str, int] = None,
                       w_nodes: int = 14,
                       has_any_trend: bool = False,
-                      col_widths: Dict[str, int] = None) -> Text:
+                      col_widths: Dict[str, int] = None,
+                      align_w: int = 0) -> Text:
     """Build one GPU model row."""
     cw = col_widths or {}
     W_MODEL = cw.get('model', 8)
@@ -390,7 +391,11 @@ def _build_model_line(m: str, d: Dict, pending: Dict, my_gpus: Dict,
     line = Text()
     line.append_text(_col(model_t, W_MODEL))
     line.append_text(_col(vram_t, W_VRAM))
-    line.append_text(_col(Text(emoji), 4))
+    # Emoji appended inline — no fixed-width column (avoids terminal width quirks)
+    if emoji:
+        line.append(f'{emoji} ')
+    else:
+        line.append('  ')
     line.append_text(_bar(U, T, W_BAR))
     line.append_text(_col(cnt_t, W_CNT))
     line.append_text(_col(dem_t, W_DEM))
@@ -410,36 +415,18 @@ def _build_model_line(m: str, d: Dict, pending: Dict, my_gpus: Dict,
     else:
         line.append_text(_col(Text(''), w_nodes))
 
-    # Pad left portion to fixed width so │ aligns across all rows
-    left_w = W_MODEL + W_VRAM + 4 + W_BAR + W_CNT + W_DEM + (3 if has_any_trend else 0) + w_nodes
-    cur_w = _display_width(line.plain)
-    if cur_w < left_w:
-        line.append(' ' * (left_w - cur_w))
-
-    # My GPU usage after nodes, separated by │
+    # Return (left_line, my_jobs_text) — build_panel aligns │ after measuring all lines
     mg = my_gpus.get(m, {})
     my_r, my_pd = mg.get('R', 0), mg.get('PD', 0)
-    mybg = ''
     my_t = Text()
-    my_t.append('│', style='bright_black')
-    my_t.append(' ', style=mybg)
-    inner = Text()
     if my_r:
-        inner.append(f'▶{my_r}', style='bold green')
+        my_t.append(f'▶{my_r}', style='bold green')
     if my_pd:
         if my_r:
-            inner.append(' ')
-        inner.append(f'⏸{my_pd}', style='bold yellow')
-    my_t.append_text(inner)
-    # pad remaining with bg
-    cur = _display_width(my_t.plain)
-    total_w = 2 + W_MYJOB  # │ + space + content
-    pad = max(0, total_w - cur)
-    if pad:
-        my_t.append(' ' * pad, style=mybg)
-    line.append_text(my_t)
+            my_t.append(' ')
+        my_t.append(f'⏸{my_pd}', style='bold yellow')
 
-    return line
+    return line, my_t
 
 
 def _line_width(show_nodes: bool) -> int:
@@ -518,19 +505,52 @@ def build_panel(stats: Dict[str, Dict], my_gpus: Dict,
 
     # Build model lines
     has_any_trend = bool(trends)
-    model_lines = []
+    model_parts: List[Tuple[Text, Text]] = []  # (left_line, my_jobs_text)
     total_T = total_U = 0
     for m in models:
         d = stats[m]
         total_T += d['Total']
         total_U += d['Used']
-        model_lines.append(_build_model_line(m, d, pending, my_gpus, show_nodes,
-                                             trend=trends.get(m),
-                                             w_nodes=max_node_w,
-                                             has_any_trend=has_any_trend,
-                                             col_widths=col_widths))
+        model_parts.append(_build_model_line(m, d, pending, my_gpus, show_nodes,
+                                              trend=trends.get(m),
+                                              w_nodes=max_node_w,
+                                              has_any_trend=has_any_trend,
+                                              col_widths=col_widths))
 
-    # Arrange into columns — use actual max line width for padding
+    # Compute fixed │ position from column widths (not from emoji rendering)
+    # emoji width is unreliable across terminals, so we use column sum + fixed emoji slot
+    emoji_slot = 3  # enough for any emoji (2 cells) + 1 space
+    max_left_w = (col_widths['model'] + col_widths['vram'] + emoji_slot
+                  + col_widths['bar'] + col_widths['cnt'] + col_widths['dem']
+                  + (3 if has_any_trend else 0) + max_node_w)
+
+    # Assemble: pad left to max_left_w, append │ + my_jobs
+    # Use character count for padding (not display width) since emoji
+    # width is unreliable — the fixed max_left_w compensates
+    model_lines: List[Text] = []
+    max_my_w = 0
+    for left, my_t in model_parts:
+        line = Text()
+        line.append_text(left)
+        pad = max_left_w - len(left.plain)
+        if pad > 0:
+            line.append(' ' * pad)
+        line.append('│', style='bright_black')
+        line.append(' ')
+        line.append_text(my_t)
+        model_lines.append(line)
+        my_w = _display_width(my_t.plain)
+        if my_w > max_my_w:
+            max_my_w = my_w
+
+    # Pad my-jobs section to uniform width
+    for ml in model_lines:
+        cur = _display_width(ml.plain)
+        target = max_left_w + 2 + max_my_w  # left + │ + space + my_jobs
+        pad = max(0, target - cur)
+        if pad:
+            ml.append(' ' * pad)
+
     actual_line_w = max((_display_width(ml.plain) for ml in model_lines), default=40)
     rows_per_col = (n + n_cols - 1) // n_cols
     sep = Text('  │ ', style='bright_black')
@@ -564,22 +584,19 @@ def build_panel(stats: Dict[str, Dict], my_gpus: Dict,
     tcnt.append(f'/{total_T}', style=f'bright_black {bg}')
     total_line.append_text(_col(tname, col_widths['model']))
     total_line.append_text(_col(Text('', style=bg), col_widths['vram']))
-    total_line.append_text(_col(Text(_usage_emoji(total_pct * 100), style=bg), 4))
+    emoji_t = _usage_emoji(total_pct * 100)
+    if emoji_t:
+        total_line.append(emoji_t, style=bg)
+        total_line.append(' ', style=bg)
     total_line.append_text(_bar(total_U, total_T, col_widths['bar']))
     total_line.append_text(_col(tcnt, col_widths['cnt']))
+    # Pad to same │ position as model lines
+    cur_w = _display_width(total_line.plain)
+    if max_left_w > cur_w:
+        total_line.append(' ' * (max_left_w - cur_w), style=bg)
+    total_line.append('│', style='bright_black')
     total_my_r = sum(v.get('R', 0) for v in my_gpus.values())
     total_my_pd = sum(v.get('PD', 0) for v in my_gpus.values())
-    # Measure full row width from model lines (which include │ + my-jobs)
-    row_w = _display_width(output_lines[0].plain) if output_lines else 60
-    # Find display position of │ in the first model line
-    first_plain = output_lines[0].plain if output_lines else ''
-    pipe_char_pos = first_plain.rfind('│')
-    pipe_display_pos = _display_width(first_plain[:pipe_char_pos]) if pipe_char_pos >= 0 else row_w
-    # Pad total row to align │ at same display position
-    cur_w = _display_width(total_line.plain)
-    if pipe_display_pos > cur_w:
-        total_line.append(' ' * (pipe_display_pos - cur_w), style=bg)
-    total_line.append('│', style='bright_black')
     my_total = Text()
     my_total.append(' ')
     if total_my_r:
@@ -588,11 +605,10 @@ def build_panel(stats: Dict[str, Dict], my_gpus: Dict,
         if total_my_r:
             my_total.append(' ')
         my_total.append(f'⏸{total_my_pd}', style='bold yellow')
-    # Pad to match total row width
     total_line.append_text(my_total)
     cur_w2 = _display_width(total_line.plain)
-    if cur_w2 < row_w:
-        total_line.append(' ' * (row_w - cur_w2))
+    if cur_w2 < actual_line_w:
+        total_line.append(' ' * (actual_line_w - cur_w2))
     output_lines.append(total_line)
 
     subtitle = f'[dim]{user}[/dim]'
