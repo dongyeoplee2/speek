@@ -519,12 +519,15 @@ class HistoryWidget(FoldableTableMixin, Widget):
             yield LoadingIndicator()
             with TabbedContent(id='history-tc', initial='tc-unread'):
                 with TabPane('1 Unread', id='tc-unread'):
+                    yield Static('no unread events', id='empty-unread', classes='empty-state')
                     yield SpeekDataTable(id='dt-unread', cursor_type='row', show_cursor=True)
                     yield Static('', id='stats-unread', classes='history-stats')
                 with TabPane('2 Read', id='tc-read'):
+                    yield Static('no read events', id='empty-read', classes='empty-state')
                     yield SpeekDataTable(id='dt-read', cursor_type='row', show_cursor=True)
                     yield Static('', id='stats-read', classes='history-stats')
                 with TabPane('3 All', id='tc-all'):
+                    yield Static('', id='empty-all', classes='empty-state')
                     yield SpeekDataTable(id='dt-all', cursor_type='row', show_cursor=True)
                     yield Static('', id='stats-all', classes='history-stats')
 
@@ -904,6 +907,17 @@ class HistoryWidget(FoldableTableMixin, Widget):
             empty = len(groups) == 0
             dt.display = not empty
             stats.set_class(empty, 'history-empty')
+            # Show/hide empty-state placeholder
+            try:
+                es = self.query_one(f'#empty-{tab}', Static)
+                if empty:
+                    label = {'unread': 'No unread events',
+                             'read': 'No read events',
+                             'all': f'No events in last {self.lookback_days}d'}
+                    es.update(label.get(tab, 'No events'))
+                es.display = empty
+            except Exception:
+                pass
         self._update_title()
 
     def _update_title(self) -> None:
