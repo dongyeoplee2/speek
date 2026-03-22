@@ -93,6 +93,7 @@ class SpeekMax(App[None]):
         self._cmd_squeue: bool = True
         self._cmd_scontrol: bool = True
         self._cmd_sacct: bool = True
+        self._cmd_sreport: bool = True
         self._cmd_sinfo: bool = True
         # Feature flags
         self._feat_history: bool = True      # sacct history widget

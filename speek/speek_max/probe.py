@@ -86,6 +86,10 @@ def _probe_commands() -> Dict[str, object]:
                      ['sshare',   '-al', '-o', 'User,FairShare', '--noheader']),
         'scancel':  (['scancel',  '--version'],
                      ['scancel',  '--version']),
+        'sreport':  (['sreport',  '--version'],
+                     ['sreport',  'cluster', 'utilization',
+                      f'start={__import__("datetime").date.today().isoformat()}',
+                      '--parsable2', '--noheader']),
     }
     result: Dict[str, object] = {}
     for name, (avail_cmd, timing_cmd) in checks.items():

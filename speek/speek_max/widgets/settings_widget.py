@@ -27,6 +27,7 @@ _CMD_ROWS = [
     ('cmd-squeue',   '_cmd_squeue',   'My Jobs panel, Queue tab, Priority popup, GPU stats'),
     ('cmd-scontrol', '_cmd_scontrol', 'Node tab status, active job detail popup'),
     ('cmd-sacct',    '_cmd_sacct',    'History, Users tab, Stats issues, completed job details'),
+    ('cmd-sreport',  '_cmd_sreport',  'User stats fallback (CPU hours when sacct unavailable)'),
     ('cmd-sinfo',    '_cmd_sinfo',    'Partition list (Stats filter, job submission)'),
 ]
 
@@ -361,6 +362,7 @@ class SettingsWidget(Widget):
         '_cmd_squeue':          True,
         '_cmd_scontrol':        True,
         '_cmd_sacct':           True,
+        '_cmd_sreport':         True,
         '_cmd_sinfo':           True,
         '_feat_history':        True,
         '_feat_issue_stats':    True,
@@ -385,6 +387,7 @@ class SettingsWidget(Widget):
             '_cmd_squeue':          app._cmd_squeue,
             '_cmd_scontrol':        app._cmd_scontrol,
             '_cmd_sacct':           app._cmd_sacct,
+            '_cmd_sreport':         app._cmd_sreport,
             '_cmd_sinfo':           app._cmd_sinfo,
             '_feat_history':        app._feat_history,
             '_feat_issue_stats':    app._feat_issue_stats,

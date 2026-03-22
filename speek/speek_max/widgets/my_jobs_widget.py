@@ -16,7 +16,10 @@ from textual.widget import Widget
 from speek.speek_max.widgets.modal_base import SpeekModal
 from textual.widgets import Button, DataTable, Input, Label, LoadingIndicator, Static, TabbedContent, TabPane
 
-from speek.speek_max.slurm import fetch_all_priorities, fetch_history, fetch_my_jobs, get_job_log_path
+from speek.speek_max.slurm import (
+    fetch_all_priorities, fetch_history, fetch_active_jobs_scontrol,
+    fetch_my_jobs, get_job_log_path,
+)
 from speek.speek_max._utils import fmt_time, tc, safe, state_sym, state_badge
 from speek.speek_max.widgets.datatable import SpeekDataTable
 from speek.speek_max.widgets.foldable_table import (
@@ -1243,11 +1246,28 @@ class MyJobsWidget(FoldableTableMixin, Widget):
         days = getattr(self.app, '_history_lookback_days', 7)
 
         def _worker():
-            if not getattr(self.app, '_cmd_sacct', True):
+            if getattr(self.app, '_cmd_sacct', True):
+                # Level 1: sacct (full history)
+                rows = fetch_history(days)
+            elif getattr(self.app, '_cmd_scontrol', True):
+                # Level 2: scontrol active jobs + transition cache
+                from speek.speek_max.event_watcher import load_fallback_history
+                active = fetch_active_jobs_scontrol()
+                cached = load_fallback_history(user=self.user, days=days)
+                seen = set()
+                rows = []
+                for row in active:
+                    if row[0] not in seen:
+                        seen.add(row[0])
+                        rows.append(row)
+                for row in cached:
+                    if row[0] not in seen:
+                        seen.add(row[0])
+                        rows.append(row)
+            else:
+                # Level 3: transition cache only
                 from speek.speek_max.event_watcher import load_fallback_history
                 rows = load_fallback_history(user=self.user, days=days)
-            else:
-                rows = fetch_history(days)
             self.app.call_from_thread(self._populate_history, rows)
 
         self.run_worker(_worker, thread=True, exclusive=True, group='myjobs-hist')

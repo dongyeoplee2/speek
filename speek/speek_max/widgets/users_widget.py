@@ -10,7 +10,10 @@ from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Label, LoadingIndicator, Static
 
-from speek.speek_max.slurm import fetch_user_stats, fetch_fairshares
+from speek.speek_max.slurm import (
+    fetch_user_stats, fetch_user_stats_sreport, fetch_user_stats_squeue,
+    fetch_fairshares,
+)
 from speek.speek_max._utils import tc
 from speek.speek_max.widgets.datatable import SpeekDataTable
 from speek.speek_max.widgets.foldable_table import (
@@ -124,27 +127,52 @@ class UsersWidget(FoldableTableMixin, Widget):
                 lbl.styles.text_style = 'none'
 
     def _load(self) -> None:
-        if not getattr(self.app, '_cmd_sacct', True):
+        days = self.lookback_days
+        if getattr(self.app, '_cmd_sacct', True):
+            # Level 1: sacct (full per-user breakdown)
+            self.run_worker(
+                lambda: (fetch_user_stats(days), fetch_fairshares(), 'sacct'),
+                thread=True, exclusive=True, group='users',
+            )
+        elif getattr(self.app, '_cmd_sreport', True):
+            # Level 2: sreport (CPU hours, no per-partition breakdown)
+            self.run_worker(
+                lambda: (fetch_user_stats_sreport(days), fetch_fairshares(), 'sreport'),
+                thread=True, exclusive=True, group='users',
+            )
+        elif getattr(self.app, '_cmd_squeue', True):
+            # Level 3: squeue only (current running/pending, no history)
+            self.run_worker(
+                lambda: (fetch_user_stats_squeue(), {}, 'squeue'),
+                thread=True, exclusive=True, group='users',
+            )
+        else:
             try:
                 self.query_one(LoadingIndicator).display = False
                 e = self.query_one('#users-empty', Static)
-                e.update('[dim]sacct unavailable on this cluster[/dim]')
+                e.update('[dim]No SLURM commands available[/dim]')
                 e.display = True
             except Exception:
                 pass
-            return
-        days = self.lookback_days
-        self.run_worker(
-            lambda: (fetch_user_stats(days), fetch_fairshares()),
-            thread=True, exclusive=True, group='users',
-        )
 
     def on_worker_state_changed(self, event) -> None:
         from textual.worker import WorkerState
         if event.worker.group == 'users' and event.state == WorkerState.SUCCESS:
-            rows, fairshares = event.worker.result
+            result = event.worker.result
+            if len(result) == 3:
+                rows, fairshares, source = result
+            else:
+                rows, fairshares = result
+                source = 'sacct'
             self._last_rows = rows
             self._last_fairshares = fairshares
+            # Show fallback level in border subtitle
+            if source == 'sreport':
+                self.border_subtitle = '[dim]sreport — CPU hours only[/dim]'
+            elif source == 'squeue':
+                self.border_subtitle = '[dim]squeue — current jobs only[/dim]'
+            else:
+                self.border_subtitle = ''
             self._update(rows, fairshares)
 
     def _get_selected_user(self) -> str | None:

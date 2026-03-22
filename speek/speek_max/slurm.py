@@ -1188,6 +1188,304 @@ def fetch_user_stats(days: int = 30) -> List[Dict]:
     return result
 
 
+# ── Fallback: sreport user stats ──────────────────────────────────────────────
+
+_sreport_cache: Optional[Tuple[float, List[Dict]]] = None
+_SREPORT_TTL = 30.0
+_sreport_lock = _threading.Lock()
+
+
+def fetch_user_stats_sreport(days: int = 30) -> List[Dict]:
+    """Fallback for fetch_user_stats using ``sreport user top``.
+
+    Returns the same dict format but with limited fields:
+    gpu_hours=0, success_pct=0, part_breakdown=[], etc.
+    Only cpu_hours is populated from sreport; running/pending come from squeue.
+    """
+    global _sreport_cache
+    now = _time.monotonic()
+    with _sreport_lock:
+        if _sreport_cache is not None and now - _sreport_cache[0] < _SREPORT_TTL:
+            return _sreport_cache[1]
+
+    start_dt = (datetime.now() - timedelta(days=days))
+    end_dt = datetime.now() + timedelta(days=1)
+    start_str = start_dt.strftime('%Y-%m-%d')
+    end_str = end_dt.strftime('%Y-%m-%d')
+
+    # ── sreport user top ──
+    user_cpu: Dict[str, float] = {}
+    try:
+        out = subprocess.check_output(
+            ['sreport', 'user', 'top', f'start={start_str}',
+             f'end={end_str}', '-t', 'hours', '--parsable2', '--noheader'],
+            text=True, stderr=subprocess.DEVNULL, timeout=10,
+        )
+        for ln in out.splitlines():
+            if not ln.strip():
+                continue
+            # Format: Cluster|Login|Proper Name|Account|Used
+            parts = (ln.split('|') + [''] * 5)[:5]
+            user = parts[1].strip()
+            try:
+                cpu_h = float(parts[4].strip())
+            except (ValueError, IndexError):
+                cpu_h = 0.0
+            if user:
+                user_cpu[user] = user_cpu.get(user, 0.0) + cpu_h
+    except Exception:
+        pass
+
+    # ── current squeue state (same logic as fetch_user_stats) ──
+    running_gpus: Dict[str, int] = defaultdict(int)
+    pending_jobs: Dict[str, int] = defaultdict(int)
+    try:
+        sq = subprocess.check_output(
+            ['squeue', '-o', '%u|%T|%b', '-h', '--states=RUNNING,PENDING'],
+            text=True, stderr=subprocess.DEVNULL,
+        )
+        for ln in sq.splitlines():
+            if not ln.strip():
+                continue
+            u, st, gres = (ln.split('|') + ['', '', ''])[:3]
+            u = u.strip()
+            mt = GPU_RE_NAMED.search(gres.strip())
+            if mt:
+                g = int(mt.group(2))
+            else:
+                flex = FLEX_RE.search(gres.strip())
+                g = int(flex.group(1)) if flex else 0
+            if st.strip() == 'RUNNING':
+                running_gpus[u] += g
+            else:
+                pending_jobs[u] += 1
+    except Exception:
+        pass
+
+    # ── merge ──
+    all_users = set(user_cpu.keys()) | set(running_gpus.keys()) | set(pending_jobs.keys())
+    result = []
+    for user in all_users:
+        cpu_hours = user_cpu.get(user, 0.0)
+        result.append({
+            'user':           user,
+            'running_gpus':   running_gpus.get(user, 0),
+            'pending_jobs':   pending_jobs.get(user, 0),
+            'total_jobs':     0,       # not available from sreport
+            'completed':      0,
+            'failed':         0,
+            'cancelled':      0,
+            'gpu_hours':      0.0,     # sreport gives CPU hours, not GPU hours
+            'cpu_hours':      cpu_hours,
+            'avg_secs':       0,
+            'top_partition':  '',
+            'part_breakdown': [],
+            '_sreport':       True,    # marker for limited data
+        })
+
+    result.sort(key=lambda r: (-r['running_gpus'], -r['cpu_hours']))
+    with _sreport_lock:
+        _sreport_cache = (_time.monotonic(), result)
+    return result
+
+
+# ── Fallback: squeue-only user stats ─────────────────────────────────────────
+
+def fetch_user_stats_squeue() -> List[Dict]:
+    """Minimal fallback: derive user stats from current squeue only.
+
+    No history, no success rates — just who is running/pending right now.
+    """
+    running_gpus: Dict[str, int] = defaultdict(int)
+    pending_jobs: Dict[str, int] = defaultdict(int)
+    try:
+        sq = subprocess.check_output(
+            ['squeue', '-o', '%u|%T|%b', '-h', '--states=RUNNING,PENDING'],
+            text=True, stderr=subprocess.DEVNULL,
+        )
+        for ln in sq.splitlines():
+            if not ln.strip():
+                continue
+            u, st, gres = (ln.split('|') + ['', '', ''])[:3]
+            u = u.strip()
+            mt = GPU_RE_NAMED.search(gres.strip())
+            if mt:
+                g = int(mt.group(2))
+            else:
+                flex = FLEX_RE.search(gres.strip())
+                g = int(flex.group(1)) if flex else 0
+            if st.strip() == 'RUNNING':
+                running_gpus[u] += g
+            else:
+                pending_jobs[u] += 1
+    except Exception:
+        pass
+
+    all_users = set(running_gpus.keys()) | set(pending_jobs.keys())
+    result = []
+    for user in all_users:
+        result.append({
+            'user':           user,
+            'running_gpus':   running_gpus.get(user, 0),
+            'pending_jobs':   pending_jobs.get(user, 0),
+            'total_jobs':     0,
+            'completed':      0,
+            'failed':         0,
+            'cancelled':      0,
+            'gpu_hours':      0.0,
+            'cpu_hours':      0.0,
+            'avg_secs':       0,
+            'top_partition':  '',
+            'part_breakdown': [],
+            '_squeue_only':   True,    # marker for minimal data
+        })
+
+    result.sort(key=lambda r: -r['running_gpus'])
+    return result
+
+
+# ── Fallback: scontrol active jobs as history ─────────────────────────────────
+
+_scontrol_jobs_cache: Optional[Tuple[float, List[Tuple]]] = None
+_SCONTROL_JOBS_TTL = 30.0
+_scontrol_jobs_lock = _threading.Lock()
+
+
+def fetch_active_jobs_scontrol() -> List[Tuple]:
+    """Get ALL active jobs from scontrol show job (richer than squeue).
+
+    Returns tuples compatible with sacct/history format:
+    (jid, name, partition, start, elapsed, state, exit_code, alloc_tres, nodelist)
+
+    Cached for 30 seconds.
+    """
+    global _scontrol_jobs_cache
+    now = _time.monotonic()
+    with _scontrol_jobs_lock:
+        if _scontrol_jobs_cache is not None and now - _scontrol_jobs_cache[0] < _SCONTROL_JOBS_TTL:
+            return _scontrol_jobs_cache[1]
+
+    try:
+        out = subprocess.check_output(
+            ['scontrol', 'show', 'job', '--oneliner'],
+            text=True, stderr=subprocess.DEVNULL, timeout=10,
+        )
+    except Exception:
+        return []
+
+    rows = []
+    for ln in out.splitlines():
+        if not ln.strip():
+            continue
+        info: Dict[str, str] = {}
+        for token in ln.strip().split():
+            if '=' in token:
+                k, v = token.split('=', 1)
+                info[k] = v
+
+        jid = info.get('JobId', '')
+        if not jid:
+            continue
+
+        name = info.get('JobName', '')
+        partition = info.get('Partition', '')
+        state = info.get('JobState', 'UNKNOWN')
+        elapsed = info.get('RunTime', '0:00')
+        start = info.get('StartTime', '')
+        exit_code = info.get('ExitCode', '')
+        nodelist = info.get('NodeList', '')
+
+        # Build AllocTRES-like string from TRES fields
+        alloc_tres = info.get('TRES', info.get('AllocTRES', ''))
+        if not alloc_tres:
+            # Try to reconstruct from NumCPUs and Gres
+            gres = info.get('Gres', '')
+            if gres and gres != '(null)':
+                alloc_tres = f'gres/{gres}'
+
+        # Normalize start time format
+        if start and start not in ('Unknown', 'N/A', 'None'):
+            start = start.replace('T', ' ').split('.')[0]
+            # Ensure consistent format for downstream parsing
+            try:
+                dt = datetime.strptime(start, '%Y-%m-%d %H:%M:%S')
+                start = dt.strftime('%Y-%m-%dT%H:%M:%S')
+            except ValueError:
+                pass
+
+        rows.append((
+            jid,
+            name,
+            partition,
+            start,
+            elapsed,
+            state,
+            exit_code,
+            alloc_tres,
+            nodelist,
+        ))
+
+    with _scontrol_jobs_lock:
+        _scontrol_jobs_cache = (_time.monotonic(), rows)
+    return rows
+
+
+# ── Data source level reporting ───────────────────────────────────────────────
+
+def get_data_source_levels(app) -> Dict[str, Tuple[str, str]]:
+    """Return {feature: (source_name, status)} for the Info tab.
+
+    source_name: e.g. 'sacct', 'sreport', 'squeue'
+    status: 'ok', 'limited', 'unavailable'
+    """
+    has_sacct = getattr(app, '_cmd_sacct', True)
+    has_sreport = getattr(app, '_cmd_sreport', True)
+    has_scontrol = getattr(app, '_cmd_scontrol', True)
+    has_squeue = getattr(app, '_cmd_squeue', True)
+
+    sources: Dict[str, Tuple[str, str]] = {}
+
+    # History
+    if has_sacct:
+        sources['History'] = ('sacct', 'ok')
+    elif has_scontrol:
+        sources['History'] = ('scontrol', 'limited')
+    else:
+        sources['History'] = ('cache', 'limited')
+
+    # User Stats
+    if has_sacct:
+        sources['User Stats'] = ('sacct', 'ok')
+    elif has_sreport:
+        sources['User Stats'] = ('sreport', 'limited')
+    elif has_squeue:
+        sources['User Stats'] = ('squeue', 'limited')
+    else:
+        sources['User Stats'] = ('none', 'unavailable')
+
+    # Job Detail
+    if has_sacct:
+        sources['Job Detail'] = ('sacct', 'ok')
+    elif has_scontrol:
+        sources['Job Detail'] = ('scontrol', 'limited')
+    else:
+        sources['Job Detail'] = ('cache', 'limited')
+
+    # Queue
+    if has_squeue:
+        sources['Queue'] = ('squeue', 'ok')
+    else:
+        sources['Queue'] = ('none', 'unavailable')
+
+    # Nodes
+    if has_scontrol:
+        sources['Nodes'] = ('scontrol', 'ok')
+    else:
+        sources['Nodes'] = ('none', 'unavailable')
+
+    return sources
+
+
 # ── Usage time-series ──────────────────────────────────────────────────────────
 
 # Stats cache: key → (monotonic_ts, value)

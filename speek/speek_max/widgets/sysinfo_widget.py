@@ -43,6 +43,7 @@ _CMD_CONSEQUENCES = {
     'sprio':    'Job priority scores in Priority popup',
     'sshare':   'Fairshare scores in Priority popup',
     'scancel':  'Job cancellation from My Jobs',
+    'sreport':  'User stats fallback (CPU hours when sacct unavailable)',
 }
 
 _FIELD_CONSEQUENCES = {
@@ -132,8 +133,8 @@ class SysInfoWidget(Widget):
     .si-age  { color: $text-muted; height: 1; }
     """
 
-    _SI_SECTIONS = ['cluster', 'gpu', 'commands', 'sacct', 'missing',
-                     'priority', 'myshare', 'cache']
+    _SI_SECTIONS = ['cluster', 'gpu', 'commands', 'datasources', 'sacct',
+                     'missing', 'priority', 'myshare', 'cache']
 
     def compose(self) -> ComposeResult:
         with VerticalScroll():
@@ -244,6 +245,23 @@ class SysInfoWidget(Widget):
             name_str = name if ok else f'[dim]{name}[/dim]'
             cmd_table.add_row(ico, name_str, lat, consequence)
         self.query_one('#si-commands', Static).update(cmd_table)
+
+        # ── Data Sources ──
+        self.query_one('#si-header-datasources', Label).update('── Data Sources ──')
+        ds_table = RichTable(show_header=False, show_edge=False, box=None,
+                             pad_edge=False, padding=(0, 1, 0, 0))
+        ds_table.add_column('feature', style='bold', no_wrap=True, min_width=12)
+        ds_table.add_column('chain', min_width=40)
+        try:
+            from speek.speek_max.slurm import get_data_source_levels
+            sources = get_data_source_levels(self.app)
+            for feature, (source, status) in sources.items():
+                ico = _icon(status != 'unavailable', tv, warn=(status == 'limited'))
+                suffix = ' [dim](limited)[/dim]' if status == 'limited' else ''
+                ds_table.add_row(feature, f'{ico} {source}{suffix}')
+        except Exception:
+            ds_table.add_row('[dim]Could not determine data sources[/]', '')
+        self.query_one('#si-datasources', Static).update(ds_table)
 
         # ── sacct Capabilities ──
         self.query_one('#si-header-sacct', Label).update('── sacct Capabilities ──')

@@ -124,6 +124,8 @@ class EventWatcher:
                 'start': info.get('StartTime', ''),
                 'end': info.get('EndTime', ''),
                 'exit_code': info.get('ExitCode', ''),
+                'alloc_tres': info.get('TRES', info.get('AllocTRES', '')),
+                'nodelist': info.get('NodeList', ''),
                 'user': self._user,
                 'ts': now,
             })
@@ -188,7 +190,7 @@ def load_fallback_history(user: str = '', days: int = 7) -> List[Tuple]:
             t.get('elapsed', ''),
             t.get('state', 'UNKNOWN'),
             t.get('exit_code', ''),
-            '',  # alloc_tres (not available without sacct)
-            '',  # nodelist
+            t.get('alloc_tres', ''),   # enriched from scontrol when available
+            t.get('nodelist', ''),     # enriched from scontrol when available
         ))
     return rows

@@ -22,7 +22,7 @@ from textual.widgets import (
     TabbedContent, TabPane,
 )
 
-from speek.speek_max.slurm import fetch_history
+from speek.speek_max.slurm import fetch_history, fetch_active_jobs_scontrol
 from speek.speek_max._utils import tc, safe, state_sym, state_badge, STATE_SYMBOL
 from speek.speek_max.widgets.datatable import SpeekDataTable
 from speek.speek_max.widgets.foldable_table import (
@@ -601,25 +601,53 @@ class HistoryWidget(FoldableTableMixin, Widget):
             pass
 
     def _load(self) -> None:
-        if not getattr(self.app, '_cmd_sacct', True):
-            # Fallback: use squeue-based transition history
+        if getattr(self.app, '_cmd_sacct', True) and getattr(self.app, '_feat_history', True):
+            # Level 1: sacct (full history, any time range)
+            self.border_subtitle = ''
+            self.query_one(LoadingIndicator).display = True
+            days = self.lookback_days
+            self.run_worker(
+                lambda: fetch_history(days),
+                thread=True, exclusive=True, group='history',
+            )
+        elif getattr(self.app, '_cmd_scontrol', True):
+            # Level 2: scontrol show job (active/recent) + transition cache
             from speek.speek_max.event_watcher import load_fallback_history
             days = self.lookback_days
-            self.border_subtitle = '[dim]sacct unavailable — limited history[/dim]'
+            user = getattr(self.app, 'user', '')
+            self.border_subtitle = '[dim]scontrol — active + cached history[/dim]'
+            self.query_one(LoadingIndicator).display = True
+
+            def _scontrol_fallback():
+                active = fetch_active_jobs_scontrol()
+                cached = load_fallback_history(user=user, days=days)
+                # Merge: active jobs first, then cached (deduplicate by jid)
+                seen = set()
+                merged = []
+                for row in active:
+                    if row[0] not in seen:
+                        seen.add(row[0])
+                        merged.append(row)
+                for row in cached:
+                    if row[0] not in seen:
+                        seen.add(row[0])
+                        merged.append(row)
+                return merged
+
+            self.run_worker(
+                _scontrol_fallback,
+                thread=True, exclusive=True, group='history',
+            )
+        else:
+            # Level 3: transition cache only
+            from speek.speek_max.event_watcher import load_fallback_history
+            days = self.lookback_days
+            self.border_subtitle = '[dim]cache only — limited history[/dim]'
             self.run_worker(
                 lambda: load_fallback_history(
                     user=getattr(self.app, 'user', ''), days=days),
                 thread=True, exclusive=True, group='history',
             )
-            return
-        if not getattr(self.app, '_feat_history', True):
-            return
-        self.query_one(LoadingIndicator).display = True
-        days = self.lookback_days
-        self.run_worker(
-            lambda: fetch_history(days),
-            thread=True, exclusive=True, group='history',
-        )
 
     def on_worker_state_changed(self, event) -> None:
         from textual.worker import WorkerState
