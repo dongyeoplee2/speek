@@ -10,11 +10,11 @@ from textual.widgets import Label, Static
 
 
 def _kb_table(rows: list) -> Table:
-    """Build an invisible two-column table for key-binding rows."""
-    t = Table(show_header=False, show_edge=False, box=None,
+    """Build a two-column table for key-binding rows."""
+    t = Table(show_header=True, show_edge=False, box=None,
               pad_edge=False, padding=(0, 1, 0, 0))
-    t.add_column('key', style='bold', no_wrap=True, min_width=14, ratio=1)
-    t.add_column('desc', ratio=3)
+    t.add_column('Key', style='bold', no_wrap=True, min_width=14, ratio=1)
+    t.add_column('Action', ratio=3)
     for key, desc in rows:
         t.add_row(key, desc)
     return t

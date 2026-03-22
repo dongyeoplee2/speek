@@ -505,7 +505,8 @@ ClusterBar {
 /* ── Panel widgets ──────────────────────────────────────────────────────── */
 QueueWidget,
 NodeWidget,
-PriorityWidget {
+PriorityWidget,
+UsersWidget {
   height: 1fr;
   background: $background;
   border: round $accent 40%;

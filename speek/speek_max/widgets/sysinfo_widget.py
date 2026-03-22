@@ -202,42 +202,46 @@ class SysInfoWidget(Widget):
 
         # ── GPU Hardware ──
         self.query_one('#si-header-gpu', Label).update('── GPU Hardware ──')
-        gpu_rows: list[tuple[str, str]] = []
+        gpu_table = RichTable(show_header=True, show_edge=False, box=None,
+                              pad_edge=False, padding=(0, 1, 0, 0))
+        gpu_table.add_column('Model', style='bold', no_wrap=True, min_width=12)
+        gpu_table.add_column('GPUs', justify='right', style='cyan', min_width=5)
+        gpu_table.add_column('Nodes', justify='right', style='dim', min_width=5)
+        gpu_table.add_column('VRAM', justify='right', min_width=6)
+        gpu_table.add_column('CPU/GPU', justify='right', style='dim', min_width=7)
+        gpu_table.add_column('RAM/GPU', justify='right', style='dim', min_width=7)
         try:
             from speek.speek_max.slurm import fetch_cluster_stats
             stats = fetch_cluster_stats()
             if stats:
                 for model in sorted(stats, key=lambda m: stats[m]['Total'], reverse=True):
                     d = stats[model]
+                    n_nodes = len(d.get('Nodes', []))
                     vram = d.get('VRAM')
                     cpu_pg = d.get('CPUperGPU')
                     ram_pg = d.get('RAMperGPU')
-                    n_nodes = len(d.get('Nodes', []))
-                    total = d['Total']
-                    specs = []
-                    if vram:
-                        specs.append(f'VRAM {vram}GB')
-                    if cpu_pg:
-                        specs.append(f'{cpu_pg} CPUs/GPU')
-                    if ram_pg:
-                        specs.append(f'{ram_pg}GB RAM/GPU')
-                    specs.append(f'{n_nodes} node{"s" if n_nodes != 1 else ""}')
-                    specs.append(f'{total} GPUs')
-                    gpu_rows.append((f'[bold]{model}[/bold]', f'[dim]{" · ".join(specs)}[/dim]'))
+                    gpu_table.add_row(
+                        model,
+                        str(d['Total']),
+                        str(n_nodes),
+                        f'{vram}GB' if vram else '–',
+                        str(cpu_pg) if cpu_pg else '–',
+                        f'{ram_pg}GB' if ram_pg else '–',
+                    )
             else:
-                gpu_rows.append(('[dim]No GPU data available[/]', ''))
+                gpu_table.add_row('[dim]No GPU data available[/]', '', '', '', '', '')
         except Exception:
-            gpu_rows.append(('[dim]Could not fetch GPU info[/]', ''))
-        self.query_one('#si-gpu', Static).update(_kv_table(gpu_rows, key_width=W_NAME))
+            gpu_table.add_row('[dim]Could not fetch GPU info[/]', '', '', '', '', '')
+        self.query_one('#si-gpu', Static).update(gpu_table)
 
         # ── SLURM Commands ──
         self.query_one('#si-header-commands', Label).update('── SLURM Commands ──')
-        cmd_table = RichTable(show_header=False, show_edge=False, box=None,
+        cmd_table = RichTable(show_header=True, show_edge=False, box=None,
                               pad_edge=False, padding=(0, 1, 0, 0))
-        cmd_table.add_column('icon', no_wrap=True, width=2)
-        cmd_table.add_column('name', style='bold', no_wrap=True, min_width=12)
-        cmd_table.add_column('latency', justify='right', min_width=8)
-        cmd_table.add_column('desc', style='dim')
+        cmd_table.add_column('', no_wrap=True, width=2)
+        cmd_table.add_column('Command', style='bold', no_wrap=True, min_width=12)
+        cmd_table.add_column('Latency', justify='right', min_width=8)
+        cmd_table.add_column('Used by', style='dim')
         cmds = probe.get('commands', {})
         for name, consequence in _CMD_CONSEQUENCES.items():
             entry = cmds.get(name, {})
@@ -254,10 +258,10 @@ class SysInfoWidget(Widget):
 
         # ── Data Sources ──
         self.query_one('#si-header-datasources', Label).update('── Data Sources ──')
-        ds_table = RichTable(show_header=False, show_edge=False, box=None,
+        ds_table = RichTable(show_header=True, show_edge=False, box=None,
                              pad_edge=False, padding=(0, 1, 0, 0))
-        ds_table.add_column('feature', style='bold', no_wrap=True, min_width=12)
-        ds_table.add_column('chain', min_width=40)
+        ds_table.add_column('Feature', style='bold', no_wrap=True, min_width=12)
+        ds_table.add_column('Source', min_width=40)
         try:
             from speek.speek_max.slurm import get_data_source_levels
             sources = get_data_source_levels(self.app)
@@ -271,12 +275,12 @@ class SysInfoWidget(Widget):
 
         # ── sacct Capabilities ──
         self.query_one('#si-header-sacct', Label).update('── sacct Capabilities ──')
-        sacct_table = RichTable(show_header=False, show_edge=False, box=None,
+        sacct_table = RichTable(show_header=True, show_edge=False, box=None,
                                 pad_edge=False, padding=(0, 1, 0, 0))
-        sacct_table.add_column('icon', no_wrap=True, width=2)
-        sacct_table.add_column('field', no_wrap=True, min_width=24)
-        sacct_table.add_column('latency', justify='right', min_width=8)
-        sacct_table.add_column('note', style='dim')
+        sacct_table.add_column('', no_wrap=True, width=2)
+        sacct_table.add_column('Field', no_wrap=True, min_width=24)
+        sacct_table.add_column('Latency', justify='right', min_width=8)
+        sacct_table.add_column('Note', style='dim')
         hist_entry = probe.get('sacct_history', probe.get('sacct_history_ok', False))
         if isinstance(hist_entry, dict):
             hist_ok = hist_entry.get('ok', False)
@@ -416,37 +420,49 @@ class SysInfoWidget(Widget):
         usage_ratio = share.get('usage_ratio', None)
         recovery = share.get('recovery_estimate', None)
 
-        rows: list[tuple[str, str]] = []
+        table = RichTable(show_header=True, show_edge=False, box=None,
+                          pad_edge=False, padding=(0, 1, 0, 0))
+        table.add_column('Metric', style='bold', no_wrap=True, min_width=16)
+        table.add_column('Value', justify='right', min_width=10)
+        table.add_column('Note', style='dim')
 
+        # Fairshare
         if fs is not None:
             fs_color = c_success if fs >= 0.5 else c_warning if fs >= 0.2 else c_error
-            rows.append(('Fairshare score', f'[{fs_color}]{fs:.3f}[/]'))
+            table.add_row('Fairshare', f'[{fs_color}]{fs:.3f}[/]',
+                          'Higher is better (0–1)')
         else:
-            rows.append(('Fairshare score', f'[{c_muted}]—[/]'))
+            table.add_row('Fairshare', f'[{c_muted}]—[/]', '')
 
+        # Effective usage
         if eff_usage is not None:
-            rows.append(('Effective usage', f'{eff_usage:.1f}%'))
+            table.add_row('Eff. usage', f'{eff_usage:.1f}%', '')
         else:
-            rows.append(('Effective usage', f'[{c_muted}]—[/]'))
+            table.add_row('Eff. usage', f'[{c_muted}]—[/]', '')
 
+        # Fair allocation
         if fair_alloc is not None:
-            rows.append(('Fair allocation', f'{fair_alloc:.1f}%'))
+            table.add_row('Fair alloc.', f'{fair_alloc:.1f}%', '')
         else:
-            rows.append(('Fair allocation', f'[{c_muted}]—[/]'))
+            table.add_row('Fair alloc.', f'[{c_muted}]—[/]', '')
 
+        # Usage ratio
         if usage_ratio is not None:
             ratio_color = c_error if usage_ratio > 2.0 else c_warning if usage_ratio > 1.0 else c_success
-            rows.append(('Usage ratio', f'[{ratio_color}]{usage_ratio:.1f}x your share[/]'))
+            table.add_row('Usage ratio', f'[{ratio_color}]{usage_ratio:.1f}x[/]',
+                          'Your use vs. your share')
         else:
-            rows.append(('Usage ratio', f'[{c_muted}]—[/]'))
+            table.add_row('Usage ratio', f'[{c_muted}]—[/]', '')
 
+        # Recovery
         if recovery is not None:
-            rows.append(('Recovery estimate', f'[{c_muted}]{recovery}[/]'))
+            table.add_row('Recovery', f'[{c_muted}]{recovery}[/]',
+                          'Est. time to restore fairshare')
         else:
-            rows.append(('Recovery estimate', f'[{c_muted}]—[/]'))
+            table.add_row('Recovery', f'[{c_muted}]—[/]', '')
 
         try:
-            self.query_one('#si-myshare', Static).update(_kv_table(rows))
+            self.query_one('#si-myshare', Static).update(table)
         except Exception:
             pass
 
@@ -457,12 +473,12 @@ class SysInfoWidget(Widget):
         c_dim = tc(tv, 'text-muted', 'bright_black')
 
         self.query_one('#si-header-cache', Label).update('── Cache & Config Files ──')
-        cache_table = RichTable(show_header=False, show_edge=False, box=None,
+        cache_table = RichTable(show_header=True, show_edge=False, box=None,
                                 pad_edge=False, padding=(0, 1, 0, 0))
-        cache_table.add_column('icon', no_wrap=True, width=2)
-        cache_table.add_column('size', justify='right', min_width=8)
-        cache_table.add_column('path', style='dim', no_wrap=True)
-        cache_table.add_column('desc', style='dim')
+        cache_table.add_column('', no_wrap=True, width=2)
+        cache_table.add_column('Size', justify='right', min_width=8)
+        cache_table.add_column('Path', style='dim', no_wrap=True)
+        cache_table.add_column('Description', style='dim')
 
         # In-memory cache stats
         try:

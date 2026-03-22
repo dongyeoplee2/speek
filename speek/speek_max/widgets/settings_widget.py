@@ -39,6 +39,30 @@ _FEAT_ROWS = [
     ('feat-sacct-details', '_feat_sacct_details', 'sacct  ·  detail & log for completed jobs', '_cmd_sacct'),
 ]
 
+# Map widget IDs → section name (for buffering changes before Apply)
+_WIDGET_SECTION: dict[str, str] = {}
+for _sw, _a, _d in _CMD_ROWS:
+    _WIDGET_SECTION[_sw] = 'commands'
+for _sw, _a, _d, _c in _FEAT_ROWS:
+    _WIDGET_SECTION[_sw] = 'features'
+# Select widget ID → (section, app attr, coerce function)
+_SEL_MAP: dict[str, tuple[str, str, type]] = {
+    'queue-refresh-select':    ('performance', '_queue_refresh',        int),
+    'node-refresh-select':     ('performance', '_node_refresh',         int),
+    'history-refresh-select':  ('performance', '_history_refresh',      int),
+    'history-lookback-select': ('performance', '_history_lookback_days', int),
+    'issue-hours-select':      ('stats',       '_issue_hours',          int),
+    'time-format-select':      ('display',     '_time_format',          str),
+    'max-read-ids-select':     ('storage',     '_max_read_ids',         int),
+    'ping-duration-select':    ('highlights',  '_ping_duration',        int),
+    'event-fade-select':       ('highlights',  '_event_fade',           int),
+}
+for _sel_id, (_sec, _attr, _) in _SEL_MAP.items():
+    _WIDGET_SECTION[_sel_id] = _sec
+
+# Reverse: app attr → select widget CSS ID
+_ATTR_TO_SEL = {attr: f'#{sel_id}' for sel_id, (_, attr, _) in _SEL_MAP.items()}
+
 
 class SettingsWidget(Widget):
     """Settings panel."""
@@ -71,7 +95,7 @@ class SettingsWidget(Widget):
 
                 # ── SLURM Commands ────────────────────────────────────
                 yield Label('── SLURM Commands ──', classes='config-section-header')
-                with Vertical(classes='config-card'):
+                with Vertical(classes='config-card', id='section-commands'):
                     yield Static(
                         'Disable a command to turn off all features that rely on it.',
                         classes='config-desc config-cmd-note',
@@ -82,10 +106,15 @@ class SettingsWidget(Widget):
                             yield Label(cmd, classes='config-label config-cmd')
                             yield Checkbox(value=True, id=sw_id, classes='config-switch')
                             yield Static(desc, classes='config-desc')
+                    with Horizontal(classes='config-row config-apply-row'):
+                        yield Button('Apply', id='apply-commands',
+                                     classes='config-apply-btn', disabled=True)
+                        yield Static('', id='status-commands', markup=True,
+                                     classes='config-desc')
 
                 # ── Fine Controls ─────────────────────────────────────
                 yield Label('── Fine Controls ──', classes='config-section-header')
-                with Vertical(classes='config-card'):
+                with Vertical(classes='config-card', id='section-features'):
                     yield Static(
                         'Disable individual features within an enabled command.',
                         classes='config-desc config-cmd-note',
@@ -96,10 +125,15 @@ class SettingsWidget(Widget):
                             yield Label(lbl, classes='config-label')
                             yield Checkbox(value=True, id=sw_id, classes='config-switch')
                             yield Static(desc, classes='config-desc')
+                    with Horizontal(classes='config-row config-apply-row'):
+                        yield Button('Apply', id='apply-features',
+                                     classes='config-apply-btn', disabled=True)
+                        yield Static('', id='status-features', markup=True,
+                                     classes='config-desc')
 
                 # ── Performance ───────────────────────────────────────
                 yield Label('── Performance ──', classes='config-section-header')
-                with Vertical(classes='config-card'):
+                with Vertical(classes='config-card', id='section-performance'):
                     with Horizontal(classes='config-row'):
                         yield Label('Queue refresh', classes='config-label')
                         yield SpeekSelect(
@@ -129,10 +163,15 @@ class SettingsWidget(Widget):
                             id='history-lookback-select', allow_blank=False,
                         )
                         yield Static('days of history to show', classes='config-desc')
+                    with Horizontal(classes='config-row config-apply-row'):
+                        yield Button('Apply', id='apply-performance',
+                                     classes='config-apply-btn', disabled=True)
+                        yield Static('', id='status-performance', markup=True,
+                                     classes='config-desc')
 
                 # ── Stats ─────────────────────────────────────────────
                 yield Label('── Stats ──', classes='config-section-header')
-                with Vertical(classes='config-card'):
+                with Vertical(classes='config-card', id='section-stats'):
                     with Horizontal(classes='config-row'):
                         yield Label('Issue lookback', classes='config-label')
                         yield SpeekSelect(
@@ -143,10 +182,15 @@ class SettingsWidget(Widget):
                             allow_blank=False,
                         )
                         yield Static('hours to scan for failed/timeout/OOM', classes='config-desc')
+                    with Horizontal(classes='config-row config-apply-row'):
+                        yield Button('Apply', id='apply-stats',
+                                     classes='config-apply-btn', disabled=True)
+                        yield Static('', id='status-stats', markup=True,
+                                     classes='config-desc')
 
                 # ── Display ───────────────────────────────────────────
                 yield Label('── Display ──', classes='config-section-header')
-                with Vertical(classes='config-card'):
+                with Vertical(classes='config-card', id='section-display'):
                     with Horizontal(classes='config-row'):
                         yield Label('Time format', classes='config-label')
                         yield SpeekSelect(
@@ -156,10 +200,15 @@ class SettingsWidget(Widget):
                             allow_blank=False,
                         )
                         yield Static('how to show timestamps in tables', classes='config-desc')
+                    with Horizontal(classes='config-row config-apply-row'):
+                        yield Button('Apply', id='apply-display',
+                                     classes='config-apply-btn', disabled=True)
+                        yield Static('', id='status-display', markup=True,
+                                     classes='config-desc')
 
                 # ── Storage ───────────────────────────────────────────
                 yield Label('── Storage ──', classes='config-section-header')
-                with Vertical(classes='config-card'):
+                with Vertical(classes='config-card', id='section-storage'):
                     with Horizontal(classes='config-row'):
                         yield Label('Max read IDs', classes='config-label')
                         yield SpeekSelect(
@@ -169,10 +218,15 @@ class SettingsWidget(Widget):
                             allow_blank=False,
                         )
                         yield Static('max tracked read/unread job IDs', classes='config-desc')
+                    with Horizontal(classes='config-row config-apply-row'):
+                        yield Button('Apply', id='apply-storage',
+                                     classes='config-apply-btn', disabled=True)
+                        yield Static('', id='status-storage', markup=True,
+                                     classes='config-desc')
 
                 # ── Highlights ────────────────────────────────────────
                 yield Label('── Highlights ──', classes='config-section-header')
-                with Vertical(classes='config-card'):
+                with Vertical(classes='config-card', id='section-highlights'):
                     with Horizontal(classes='config-row'):
                         yield Label('Cell ping', classes='config-label')
                         yield SpeekSelect(
@@ -191,6 +245,11 @@ class SettingsWidget(Widget):
                             allow_blank=False,
                         )
                         yield Static('duration for new event row highlight', classes='config-desc')
+                    with Horizontal(classes='config-row config-apply-row'):
+                        yield Button('Apply', id='apply-highlights',
+                                     classes='config-apply-btn', disabled=True)
+                        yield Static('', id='status-highlights', markup=True,
+                                     classes='config-desc')
 
                 # ── Cache ─────────────────────────────────────────────
                 yield Label('── Cache ──', classes='config-section-header')
@@ -260,6 +319,8 @@ class SettingsWidget(Widget):
                     yield Static('', id='settings-status', markup=True)
 
     def on_mount(self) -> None:
+        self._pending: dict[str, dict[str, object]] = {}  # section → {attr: val}
+        self._mounting = True  # suppress Apply-button activation during mount
         current = self.app.theme
         try:
             self.query_one('#theme-select', SpeekSelect).value = current
@@ -270,23 +331,19 @@ class SettingsWidget(Widget):
             self.query_one('#config-user', Static).update(getpass.getuser())
         except Exception:
             pass
-        # Sync selects
-        for sel_id, attr in [
-            ('#queue-refresh-select',    '_queue_refresh'),
-            ('#node-refresh-select',     '_node_refresh'),
-            ('#history-refresh-select',  '_history_refresh'),
-            ('#history-lookback-select', '_history_lookback_days'),
-            ('#issue-hours-select',      '_issue_hours'),
-            ('#ping-duration-select',    '_ping_duration'),
-            ('#event-fade-select',       '_event_fade'),
-            ('#max-read-ids-select',     '_max_read_ids'),
-            ('#cache-oom-retention-select',       '_cache_oom_retention'),
-            ('#cache-transition-retention-select', '_cache_transition_retention'),
-        ]:
+        # Sync selects from _SEL_MAP + cache retention selects
+        _extra_sels = {
+            'cache-oom-retention-select':        '_cache_oom_retention',
+            'cache-transition-retention-select': '_cache_transition_retention',
+        }
+        for sel_id, attr in (
+            [(sid, e[1]) for sid, e in _SEL_MAP.items()]
+            + list(_extra_sels.items())
+        ):
             val = getattr(self.app, attr, None)
             if val is not None:
                 try:
-                    self.query_one(sel_id, SpeekSelect).value = val
+                    self.query_one(f'#{sel_id}', SpeekSelect).value = val
                 except Exception:
                     pass
         # Sync command switches
@@ -301,40 +358,68 @@ class SettingsWidget(Widget):
                 self.query_one(f'#{sw_id}', Checkbox).value = getattr(self.app, attr, True)
             except Exception:
                 pass
+        self._mounting = False
+
+    # ── Change buffering ──────────────────────────────────────────────────────
+
+    def _mark_pending(self, section: str, attr: str, value: object) -> None:
+        """Buffer a change and enable the section's Apply button."""
+        self._pending.setdefault(section, {})[attr] = value
+        try:
+            btn = self.query_one(f'#apply-{section}', Button)
+            btn.disabled = False
+            btn.label = 'Apply *'
+        except Exception:
+            pass
+
+    def _clear_section(self, section: str, status: str = '') -> None:
+        """Clear pending changes for a section and disable its Apply button."""
+        self._pending.pop(section, None)
+        try:
+            btn = self.query_one(f'#apply-{section}', Button)
+            btn.disabled = True
+            btn.label = 'Apply'
+        except Exception:
+            pass
+        if status:
+            try:
+                self.query_one(f'#status-{section}', Static).update(status)
+            except Exception:
+                pass
 
     def on_select_changed(self, event: SpeekSelect.Changed) -> None:
         sel_id = event.select.id
         val = event.value
         if val is None:
             return
+        # Theme applies immediately (visual preview)
         if sel_id == 'theme-select':
             self.app.theme = str(val)
             self._update_hint(str(val))
-        elif sel_id == 'issue-hours-select':
-            self.app._issue_hours = int(val)
-        elif sel_id == 'time-format-select':
-            self.app._time_format = str(val)
-        elif sel_id == 'ping-duration-select':
-            self.app._ping_duration = int(val)
-        elif sel_id == 'event-fade-select':
-            self.app._event_fade = int(val)
-        elif sel_id == 'max-read-ids-select':
-            self.app._max_read_ids = int(val)
-        elif sel_id in ('queue-refresh-select', 'node-refresh-select', 'history-refresh-select'):
-            target = sel_id.replace('-refresh-select', '')
-            self._apply_refresh(target, int(val))
-        elif sel_id == 'history-lookback-select':
-            self._apply_lookback(int(val))
+            return
+        # Cache retention selects are handled by their own Apply button
+        if sel_id in ('cache-oom-retention-select', 'cache-transition-retention-select'):
+            return
+        if getattr(self, '_mounting', True):
+            return
+        entry = _SEL_MAP.get(sel_id)
+        if entry:
+            section, attr, coerce = entry
+            self._mark_pending(section, attr, coerce(val))
 
     def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
         sw_id = event.checkbox.id
-        cmd_map = {row[0]: row[1] for row in _CMD_ROWS}
-        if sw_id in cmd_map:
-            setattr(self.app, cmd_map[sw_id], event.value)
+        if getattr(self, '_mounting', True):
             return
+        section = _WIDGET_SECTION.get(sw_id, '')
+        if not section:
+            return
+        # Find the app attr
+        cmd_map = {row[0]: row[1] for row in _CMD_ROWS}
         feat_map = {row[0]: row[1] for row in _FEAT_ROWS}
-        if sw_id in feat_map:
-            setattr(self.app, feat_map[sw_id], event.value)
+        attr = cmd_map.get(sw_id) or feat_map.get(sw_id)
+        if attr:
+            self._mark_pending(section, attr, event.value)
 
     def _apply_refresh(self, target: str, seconds: int) -> None:
         _attr = {'queue': '_queue_refresh', 'node': '_node_refresh', 'history': '_history_refresh'}
@@ -477,20 +562,16 @@ class SettingsWidget(Widget):
             except Exception:
                 pass
         # Sync Select widgets
-        for sel_id, attr in [
-            ('#queue-refresh-select',    '_queue_refresh'),
-            ('#node-refresh-select',     '_node_refresh'),
-            ('#history-refresh-select',  '_history_refresh'),
-            ('#history-lookback-select', '_history_lookback_days'),
-            ('#issue-hours-select',      '_issue_hours'),
-            ('#ping-duration-select',    '_ping_duration'),
-            ('#event-fade-select',       '_event_fade'),
-            ('#max-read-ids-select',     '_max_read_ids'),
-            ('#cache-oom-retention-select',       '_cache_oom_retention'),
-            ('#cache-transition-retention-select', '_cache_transition_retention'),
-        ]:
+        _extra_sels = {
+            'cache-oom-retention-select':        '_cache_oom_retention',
+            'cache-transition-retention-select': '_cache_transition_retention',
+        }
+        for sel_id, attr in (
+            [(sid, e[1]) for sid, e in _SEL_MAP.items()]
+            + list(_extra_sels.items())
+        ):
             try:
-                self.query_one(sel_id, SpeekSelect).value = getattr(app, attr)
+                self.query_one(f'#{sel_id}', SpeekSelect).value = getattr(app, attr)
             except Exception:
                 pass
 
@@ -519,7 +600,7 @@ class SettingsWidget(Widget):
             pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        bid = event.button.id
+        bid = event.button.id or ''
         if bid == 'settings-save-btn':
             self._save_settings()
         elif bid == 'settings-reset-btn':
@@ -533,6 +614,9 @@ class SettingsWidget(Widget):
                 ConfirmationModal('Reset all settings to defaults?'),
                 _on_confirm,
             )
+        elif bid.startswith('apply-'):
+            section = bid[len('apply-'):]
+            self._confirm_apply_section(section)
         elif bid == 'cache-clear-oom-btn':
             self._confirm_clear_cache('OOM verdicts', self._do_clear_oom)
         elif bid == 'cache-clear-transitions-btn':
@@ -543,6 +627,78 @@ class SettingsWidget(Widget):
             self._confirm_clear_cache('ALL caches (in-memory + disk)', self._do_clear_all)
         elif bid == 'cache-apply-btn':
             self._apply_cache_settings()
+
+    def _confirm_apply_section(self, section: str) -> None:
+        """Show confirmation popup, then apply buffered changes for a section."""
+        pending = self._pending.get(section)
+        if not pending:
+            return
+        from speek.speek_max.widgets.confirmation import ConfirmationModal
+        label = section.replace('-', ' ').title()
+        summary = ', '.join(
+            f'{k.lstrip("_").replace("_", " ")} → {v}'
+            for k, v in pending.items()
+        )
+
+        def _on_confirm(confirmed: bool) -> None:
+            if confirmed:
+                self._do_apply_section(section)
+            else:
+                self._revert_section(section)
+
+        self.app.push_screen(
+            ConfirmationModal(
+                f'Apply {label} changes?\n[dim]{summary}[/dim]',
+                confirm_text='Apply \\[y]',
+            ),
+            _on_confirm,
+        )
+
+    def _do_apply_section(self, section: str) -> None:
+        """Actually apply buffered changes for a section to the app."""
+        pending = self._pending.get(section, {})
+        for attr, val in pending.items():
+            setattr(self.app, attr, val)
+        # Section-specific side effects
+        if section == 'performance':
+            for attr, val in pending.items():
+                if attr == '_queue_refresh':
+                    self._apply_refresh('queue', int(val))
+                elif attr == '_node_refresh':
+                    self._apply_refresh('node', int(val))
+                elif attr == '_history_refresh':
+                    self._apply_refresh('history', int(val))
+                elif attr == '_history_lookback_days':
+                    self._apply_lookback(int(val))
+        self._clear_section(section, '[bold green]Applied[/bold green]')
+
+    def _revert_section(self, section: str) -> None:
+        """Revert UI widgets to current app values (discard pending changes)."""
+        self._mounting = True
+        pending = self._pending.get(section, {})
+        # Build checkbox attr → widget id lookup
+        _cb_attr_to_id = {a: s for s, a, *_ in _CMD_ROWS}
+        _cb_attr_to_id.update({a: s for s, a, *_ in _FEAT_ROWS})
+        for attr in pending:
+            current = getattr(self.app, attr, None)
+            if current is None:
+                continue
+            # Try checkbox
+            cb_id = _cb_attr_to_id.get(attr)
+            if cb_id:
+                try:
+                    self.query_one(f'#{cb_id}', Checkbox).value = current
+                except Exception:
+                    pass
+            # Try select
+            sel_id = _ATTR_TO_SEL.get(attr)
+            if sel_id:
+                try:
+                    self.query_one(sel_id, SpeekSelect).value = current
+                except Exception:
+                    pass
+        self._mounting = False
+        self._clear_section(section)
 
     # ── Cache management ────────────────────────────────────────────────────
 

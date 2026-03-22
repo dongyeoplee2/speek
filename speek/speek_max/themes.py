@@ -359,4 +359,4 @@ for _theme in SPEEK_THEMES.values():
         v['footer-background'] = _bg
 
 THEME_NAMES: list[str] = list(SPEEK_THEMES.keys())
-DEFAULT_THEME: str = "galaxy"
+DEFAULT_THEME: str = "aurora"

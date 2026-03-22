@@ -24,103 +24,126 @@ _STACKED_ID    = '#stats-user-chart'
 _LEGEND_ID     = '#stats-user-legend'
 
 # ── User color palette for stacked chart ──────────────────────────────────────
-
+# Ordered so that adjacent indices have maximum contrast (alternating warm/cool).
+# This means neighboring bands in the stack are always visually distinct.
 _USER_COLORS = [
     '#4A9FD9',  # blue
     '#D9534F',  # red
-    '#5CB85C',  # green
+    '#1ABC9C',  # teal
     '#F0AD4E',  # orange
     '#9B59B6',  # purple
-    '#1ABC9C',  # teal
+    '#5CB85C',  # green
     '#E74C3C',  # crimson
     '#3498DB',  # sky blue
-    '#2ECC71',  # emerald
     '#E67E22',  # carrot
+    '#2ECC71',  # emerald
     '#8E44AD',  # amethyst
     '#34495E',  # wet asphalt
 ]
 
 
+def _user_sort_key(per_group_ts: Dict, u: str) -> Tuple:
+    """Sort key: (temporal presence, total volume). Most persistent first."""
+    bkts = per_group_ts[u].get('buckets', [])
+    return (sum(1 for v in bkts if v > 0), sum(bkts))
+
+
+def _sorted_users(per_group_ts: Dict) -> List[str]:
+    """Users sorted by temporal presence (descending), then total volume."""
+    return sorted(per_group_ts.keys(),
+                  key=lambda u: _user_sort_key(per_group_ts, u), reverse=True)
+
+
+def _dim_color(hex_color: str, factor: float = 0.30) -> str:
+    """Return a dimmed version of hex_color at *factor* brightness (0=black, 1=original).
+
+    Matches Sparkline's default gradient range: `$primary 30%` → `$primary`.
+    """
+    h = hex_color.lstrip('#')
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f'#{int(r * factor):02x}{int(g * factor):02x}{int(b * factor):02x}'
+
+
 def _render_stacked_chart(per_group_ts: Dict, peak: float, n_buckets: int) -> Text:
-    """Render a stacked bar chart as Rich Text with per-user colors."""
+    """Render a stacked bar chart as Rich Text with per-user colors.
+
+    Users are stacked bottom-to-top in consistent order (highest-total at
+    bottom).  Each row-cell is colored by whichever user's band occupies that
+    vertical position, giving smooth color continuity across time.
+    """
     if not per_group_ts or peak <= 0:
         return Text('')
 
-    # Sort users by total usage (descending) for consistent color assignment
-    users = sorted(
-        per_group_ts.keys(),
-        key=lambda u: sum(per_group_ts[u].get('buckets', [])),
-        reverse=True,
-    )
+    # Most temporally persistent users at the bottom → stable horizontal bands.
+    # Sporadic users sit on top where their gaps are less visually jarring.
+    users = _sorted_users(per_group_ts)
     user_color = {u: _USER_COLORS[i % len(_USER_COLORS)] for i, u in enumerate(users)}
 
-    height = 8  # rows of block characters — matches sparkline visual height
-    # Source bucket count from actual data
+    height = 8
     src_len = max((len(d.get('buckets', [])) for d in per_group_ts.values()), default=n_buckets)
-    display_w = n_buckets  # this is the actual widget width
+    display_w = n_buckets
 
-    # Pre-compute resampled per-column data
-    col_data: List[List[Tuple[str, float]]] = []
+    # Pre-compute resampled per-column stacked bands: [(user, value), ...]
+    # ALWAYS include every user (even with val=0) so vertical positions stay
+    # fixed across columns — this is what gives horizontal color continuity.
+    # Order: highest-total at bottom (index 0) of stack.
+    col_bands: List[List[Tuple[str, float]]] = []
     for col in range(display_w):
         src_s = int(col * src_len / display_w)
-        src_e = int((col + 1) * src_len / display_w)
-        src_e = max(src_e, src_s + 1)
-        segments = []
+        src_e = max(int((col + 1) * src_len / display_w), src_s + 1)
+        bands = []
         for u in users:
             bkts = per_group_ts[u].get('buckets', [])
             val = sum(bkts[i] for i in range(src_s, min(src_e, len(bkts))))
             val /= max(1, src_e - src_s)
-            if val > 0:
-                segments.append((u, val))
-        col_data.append(segments)
+            bands.append((u, val))  # always include, even if 0
+        col_bands.append(bands)
+
+    blocks = ' ▁▂▃▄▅▆▇█'
 
     lines: List[Text] = []
     for row in range(height - 1, -1, -1):
         line = Text()
         row_bottom = (row / height) * peak
         row_top = ((row + 1) / height) * peak
+        row_h = row_top - row_bottom
 
         for col in range(display_w):
-            segments = col_data[col]
-            total = sum(v for _, v in segments)
+            bands = col_bands[col]
+            # Walk the stack from bottom, tracking cumulative height
+            cum = 0.0
+            cell_color = ''
+            fill_in_row = 0.0
+            for u, val in bands:
+                band_bottom = cum
+                band_top = cum + val
+                cum = band_top
+                # Does this band intersect this row?
+                overlap_lo = max(band_bottom, row_bottom)
+                overlap_hi = min(band_top, row_top)
+                if overlap_hi > overlap_lo:
+                    overlap = overlap_hi - overlap_lo
+                    if overlap > fill_in_row:
+                        fill_in_row = overlap
+                        cell_color = user_color[u]
 
-            if total <= row_bottom:
+            if not cell_color or cum <= row_bottom:
                 line.append(' ')
                 continue
 
-            # Walk through stacked users to find who occupies this row cell
-            cumulative = 0.0
-            cell_color = user_color[users[-1]]  # fallback
-            # Determine the midpoint of the visible portion in this row
-            visible_mid = max(row_bottom, 0) + (min(total, row_top) - max(row_bottom, 0)) / 2
-
-            cumulative = 0.0
-            for u, val in segments:
-                cumulative += val
-                if cumulative > visible_mid:
-                    cell_color = user_color[u]
-                    break
-
-            # Choose block character based on fill fraction within this row
-            fill = min(total, row_top) - row_bottom
-            frac = fill / (row_top - row_bottom) if row_top > row_bottom else 0
-            blocks = ' ▁▂▃▄▅▆▇█'
+            # How much of this row is filled by the stack
+            frac = max(0.0, min(1.0, (min(cum, row_top) - row_bottom) / row_h)) if row_h > 0 else 0
             idx = min(int(frac * 8 + 0.5), 8)
             line.append(blocks[idx], style=cell_color)
 
         lines.append(line)
 
-    result = Text('\n').join(lines)
-    return result
+    return Text('\n').join(lines)
 
 
 def _build_user_legend(per_group_ts: Dict) -> Text:
     """Build a color legend line for per-user stacked chart."""
-    users = sorted(
-        per_group_ts.keys(),
-        key=lambda u: sum(per_group_ts[u].get('buckets', [])),
-        reverse=True,
-    )
+    users = _sorted_users(per_group_ts)
     user_color = {u: _USER_COLORS[i % len(_USER_COLORS)] for i, u in enumerate(users)}
     legend = Text()
     for i, u in enumerate(users):
@@ -143,10 +166,9 @@ _RANGES: Dict[str, Tuple[timedelta, int, str]] = {
     '30d': (timedelta(days=30),   90, '%m/%d'),
 }
 
-_DIMS = ('cluster', 'partition', 'node', 'user')
+_DIMS = ('partition', 'node', 'user')
 
 _DIM_LABELS = {
-    'cluster':   'GPU Model',
     'partition': 'Partition',
     'node':      'Node',
     'user':      'User',
@@ -332,7 +354,7 @@ class StatsWidget(Widget):
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        self._dim          = 'cluster'
+        self._dim          = 'partition'
         self._range_key    = '7d'
         self._filter_val   = ''
         self._custom_start = ''
@@ -341,6 +363,8 @@ class StatsWidget(Widget):
         self._ts_buckets:  List[float] = []
         self._ts_labels:   List[str]   = []
         self._last_hover_idx: int = -1
+        self._per_group_data: Dict = {}  # stored for hover info
+        self._stacked_peak: float = 0.0
         self._w_sparkline: Sparkline | None = None
         self._w_hover:     Static    | None = None
 
@@ -452,23 +476,26 @@ class StatsWidget(Widget):
         self._update_dim_btns()
         is_issues = dim == 'issues'
         # show/hide the two content areas
-        for wid in ('#stats-chart-area', '#stats-summary', '#stats-breakdown'):
+        for wid in ('#stats-chart-area', '#stats-summary', '#stats-breakdown-scroll'):
             try:
                 self.query_one(wid).display = not is_issues
             except Exception:
                 pass
+        # Hide stacked chart when leaving user dimension
+        if dim != 'user':
+            try:
+                self.query_one(_STACKED_ID).display = False
+                self.query_one(_SPARKLINE_ID, Sparkline).display = True
+            except Exception:
+                pass
+            self._per_group_data = {}
         self.query_one(_ISSUES_ID).display = is_issues
         if is_issues:
             self.query_one(_FILTER_BAR).display = False
             self._load_issues()
             return
-        is_filter = dim != 'cluster'
-        self.query_one(_FILTER_BAR).display = is_filter
-        if is_filter:
-            self._populate_filter()
-        else:
-            self._filter_val = ''
-            self._load()
+        self.query_one(_FILTER_BAR).display = True
+        self._populate_filter()
 
     def _set_range(self, rk: str) -> None:
         self._range_key = rk
@@ -661,6 +688,14 @@ class StatsWidget(Widget):
         except Exception:
             pass
 
+        # Hide sparkline immediately for user dim to avoid green flash
+        # (stacked chart replaces it once per-group data arrives)
+        if self._dim == 'user':
+            try:
+                self.query_one(_SPARKLINE_ID, Sparkline).display = False
+            except Exception:
+                pass
+
         start, end   = self._get_window()
         _, n_buckets, _ = _RANGES.get(self._range_key, _RANGES['7d'])
         dim   = self._dim
@@ -743,15 +778,17 @@ class StatsWidget(Widget):
 
         # sparkline + y-max label
         is_user_dim = self._dim == 'user' and per_group
+        if is_user_dim:
+            self._per_group_data = per_group
+        else:
+            self._per_group_data = {}
         try:
-            from io import StringIO
-            from rich.console import Console as _RCon
-
             if is_user_dim:
                 # Show stacked colored chart, hide sparkline
                 sparkline = self.query_one(_SPARKLINE_ID, Sparkline)
                 sparkline.display = False
                 peak = ts.get('peak', 0)
+                self._stacked_peak = peak
                 try:
                     chart_w = sparkline.size.width or 60
                 except Exception:
@@ -805,17 +842,14 @@ class StatsWidget(Widget):
                 scroll = self.query_one('#stats-breakdown-scroll', VerticalScroll)
                 scroll.remove_children()
                 # Sort by total GPU hours descending
-                sorted_groups = sorted(
-                    per_group.items(),
-                    key=lambda kv: sum(kv[1].get('buckets', [])),
-                    reverse=True,
-                )
+                ordered = _sorted_users(per_group)
+                sorted_groups = [(u, per_group[u]) for u in ordered]
                 # Build color map for user dimension
                 user_color_map: Dict[str, str] = {}
                 if self._dim == 'user':
                     user_color_map = {
                         u: _USER_COLORS[i % len(_USER_COLORS)]
-                        for i, (u, _) in enumerate(sorted_groups)
+                        for i, u in enumerate(ordered)
                     }
                 for grp_name, grp_ts in sorted_groups:
                     buckets = grp_ts.get('buckets', [])
@@ -834,21 +868,28 @@ class StatsWidget(Widget):
                         f'[dim]{jobs} jobs[/dim]',
                         markup=True,
                     )
-                    spark = Sparkline(buckets, summary_function=max)
+                    if color:
+                        spark = Sparkline(buckets, summary_function=max,
+                                          min_color=_dim_color(color),
+                                          max_color=color)
+                    else:
+                        spark = Sparkline(buckets, summary_function=max)
                     scroll.mount(container)
                     container.mount(header)
                     container.mount(spark)
-                    # Apply per-user color to sparkline
-                    if color:
-                        spark.styles.color = color
             except Exception:
                 pass
 
     def _update_y_axis(self) -> None:
-        """Re-render y-axis ticks based on current sparkline height."""
+        """Re-render y-axis ticks based on current chart height."""
         try:
             peak = getattr(self, '_last_peak', 0)
-            h = self.query_one(_SPARKLINE_ID, Sparkline).size.height
+            # Use stacked chart height when in user mode, sparkline otherwise
+            if self._per_group_data:
+                h = self.query_one(_STACKED_ID, Static).size.height
+                peak = self._stacked_peak or peak
+            else:
+                h = self.query_one(_SPARKLINE_ID, Sparkline).size.height
             self.query_one('#stats-y-axis', Static).update(
                 _build_y_axis(peak, h) if (h > 0 and peak > 0) else ''
             )
@@ -900,14 +941,20 @@ class StatsWidget(Widget):
         sl   = self._w_sparkline
         if info is None or sl is None or not self._ts_buckets:
             return
-        region = sl.region
+        # Use stacked chart region when in user mode
+        if self._per_group_data:
+            try:
+                region = self.query_one(_STACKED_ID, Static).region
+            except Exception:
+                region = sl.region
+        else:
+            region = sl.region
         n      = len(self._ts_buckets)
         rel_x  = event.screen_x - region.x
         if region.width == 0 or not (0 <= rel_x < region.width):
             if self._last_hover_idx != -1:
                 self._last_hover_idx = -1
                 info.update('')
-                info.styles.offset = (0, 0)
             return
         idx = min(int(rel_x * n / region.width), n - 1)
         if idx == self._last_hover_idx:
@@ -915,21 +962,39 @@ class StatsWidget(Widget):
         self._last_hover_idx = idx
         val = self._ts_buckets[idx]
         lbl = self._ts_labels[idx] if idx < len(self._ts_labels) else ''
-        info.update(
-            f'  [dim]{lbl}[/dim]  [bold]{val:.1f}[/bold] GPUs  '
-            if lbl else f'  [bold]{val:.1f}[/bold] GPUs  '
-        )
-        # Float the label near the cursor
-        info_region = info.region
-        ox = event.screen_x - info_region.x
-        oy = event.screen_y - info_region.y - 1
-        info.styles.offset = (ox, oy)
+
+        # Build hover text
+        if self._per_group_data:
+            hover = self._build_user_hover(idx, lbl, val)
+        else:
+            hover = (
+                f'  [dim]{lbl}[/dim]  [bold]{val:.1f}[/bold] GPUs  '
+                if lbl else f'  [bold]{val:.1f}[/bold] GPUs  '
+            )
+        info.update(hover)
+
+    def _build_user_hover(self, idx: int, lbl: str, total: float) -> str:
+        """Build per-user breakdown hover text for stacked chart."""
+        pg = self._per_group_data
+        users = _sorted_users(pg)
+        user_color = {u: _USER_COLORS[i % len(_USER_COLORS)] for i, u in enumerate(users)}
+        parts = []
+        if lbl:
+            parts.append(f'[dim]{lbl}[/dim]  [bold]{total:.1f}[/bold] GPUs')
+        else:
+            parts.append(f'[bold]{total:.1f}[/bold] GPUs')
+        for u in users:
+            bkts = pg[u].get('buckets', [])
+            v = bkts[idx] if idx < len(bkts) else 0
+            if v > 0:
+                c = user_color[u]
+                parts.append(f'[{c}]●[/{c}] {u}: [bold]{v:.1f}[/bold]')
+        return '  '.join(parts)
 
     def on_leave(self, _event) -> None:
         self._last_hover_idx = -1
         if self._w_hover is not None:
             self._w_hover.update('')
-            self._w_hover.styles.offset = (0, 0)
 
     @safe('Stats issues')
     def _render_issues(self, data: Dict, ts_data: Dict, hours: int) -> None:
