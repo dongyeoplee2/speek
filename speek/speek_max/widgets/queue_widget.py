@@ -414,7 +414,7 @@ class QueueWidget(FoldableTableMixin, Widget):
             if empty_w > 0:
                 # Remaining label text without background
                 remaining = f'│ {label}'[filled:]
-                name_cell.append(remaining.ljust(empty_w)[:empty_w], style='bold')
+                name_cell.append(remaining.ljust(empty_w)[:empty_w], style='bold black on white')
 
             cells = [Text(' ') for _ in range(self._ctx.n_cols)]
             cells[self._ctx.name_col_idx] = name_cell
