@@ -602,6 +602,12 @@ class HistoryWidget(FoldableTableMixin, Widget):
 
     def _load(self) -> None:
         if not getattr(self.app, '_cmd_sacct', True):
+            try:
+                for dt_id in _DT_IDS.values():
+                    self.query_one(f'#{dt_id}', SpeekDataTable).display = False
+                self.border_subtitle = '[dim]sacct unavailable[/dim]'
+            except Exception:
+                pass
             return
         if not getattr(self.app, '_feat_history', True):
             return

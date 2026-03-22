@@ -73,6 +73,13 @@ class NodeWidget(FoldableTableMixin, Widget):
 
     def _load(self) -> None:
         if not getattr(self.app, '_cmd_scontrol', True):
+            try:
+                self.query_one(LoadingIndicator).display = False
+                e = self.query_one('#node-empty', Static)
+                e.update('[dim]scontrol unavailable on this cluster[/dim]')
+                e.display = True
+            except Exception:
+                pass
             return
         self.run_worker(self._fetch, thread=True, exclusive=True, group='nodes')
 

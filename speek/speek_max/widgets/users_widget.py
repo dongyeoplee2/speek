@@ -125,6 +125,13 @@ class UsersWidget(FoldableTableMixin, Widget):
 
     def _load(self) -> None:
         if not getattr(self.app, '_cmd_sacct', True):
+            try:
+                self.query_one(LoadingIndicator).display = False
+                e = self.query_one('#users-empty', Static)
+                e.update('[dim]sacct unavailable on this cluster[/dim]')
+                e.display = True
+            except Exception:
+                pass
             return
         days = self.lookback_days
         self.run_worker(

@@ -264,6 +264,13 @@ class MyJobsWidget(FoldableTableMixin, Widget):
 
     def _load(self) -> None:
         if not getattr(self.app, '_cmd_squeue', True):
+            try:
+                self.query_one(LoadingIndicator).display = False
+                e = self.query_one('#myjobs-empty', Static)
+                e.update('[dim]squeue unavailable on this cluster[/dim]')
+                e.display = True
+            except Exception:
+                pass
             return
         tv = self.app.theme_variables  # snapshot on main thread
         self.run_worker(
