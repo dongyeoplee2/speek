@@ -586,14 +586,16 @@ def build_panel(stats: Dict[str, Dict], my_gpus: Dict,
     total_line.append_text(_col(Text('', style=bg), col_widths['vram']))
     emoji_t = _usage_emoji(total_pct * 100)
     if emoji_t:
-        total_line.append(emoji_t, style=bg)
-        total_line.append(' ', style=bg)
+        total_line.append(f'{emoji_t} ', style=bg)
+    else:
+        total_line.append('   ', style=bg)
     total_line.append_text(_bar(total_U, total_T, col_widths['bar']))
     total_line.append_text(_col(tcnt, col_widths['cnt']))
-    # Pad to same │ position as model lines
-    cur_w = _display_width(total_line.plain)
-    if max_left_w > cur_w:
-        total_line.append(' ' * (max_left_w - cur_w), style=bg)
+    # Pad to same │ position as model lines (use len, not display_width — matches model rows)
+    cur_len = len(total_line.plain)
+    target_len = max_left_w
+    if cur_len < target_len:
+        total_line.append(' ' * (target_len - cur_len), style=bg)
     total_line.append('│', style='bright_black')
     total_my_r = sum(v.get('R', 0) for v in my_gpus.values())
     total_my_pd = sum(v.get('PD', 0) for v in my_gpus.values())
