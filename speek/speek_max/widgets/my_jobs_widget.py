@@ -920,6 +920,15 @@ class MyJobsWidget(FoldableTableMixin, Widget):
         projects: Dict, part_ranked: Dict, part_rank_index: Dict,
         stats_text: Optional[Text], n_run: int, n_pend: int, colors: tuple,
     ) -> None:
+        # Always hide loading indicator and show empty state if needed
+        self.query_one(LoadingIndicator).display = False
+        empty = self.query_one('#myjobs-empty', Static)
+        if not rows:
+            empty.update(f'No active or pending jobs for {self.user}')
+            empty.display = True
+        else:
+            empty.display = False
+
         if sig == self._last_myjobs_sig:
             self._last_rows = rows
             self._last_priorities = priorities or {}
@@ -928,11 +937,7 @@ class MyJobsWidget(FoldableTableMixin, Widget):
         self._last_rows = rows
         self._last_priorities = priorities or {}
 
-        dt    = self.query_one(SpeekDataTable)
-        empty = self.query_one('#myjobs-empty', Static)
-        empty.display = not rows
-        if not rows:
-            empty.update(f'No active or pending jobs for {self.user}')
+        dt = self.query_one(SpeekDataTable)
 
         # Prune stale data
         self._current_ctx.collapsed &= set(projects.keys())
