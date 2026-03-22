@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Tuple
 from rich.align import Align
 from rich.console import Console, Group
 from rich.panel import Panel
+from rich.table import Table as RichTable
 from rich.text import Text
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -451,172 +452,108 @@ def build_panel(stats: Dict[str, Dict], my_gpus: Dict,
     pending = _fetch_pending()
     trends = _compute_trends(stats)
     models = sorted(stats, key=lambda m: stats[m]['Total'], reverse=True)
-    n = len(models)
-
-    # Decide layout: how many columns fit?
-    # Each column needs ~45 chars (no nodes) or ~60 chars (with nodes)
-    # Panel border + padding = ~6 chars
-    usable_w = term_w - 6
-    # Available rows for GPU models (panel border=2, total row=1)
-    usable_h = term_h - 4
-
-    # Try with nodes first, then without
-    col_w_nodes = _line_width(True)
-    col_w_compact = _line_width(False)
-
-    if n <= usable_h:
-        # Everything fits in one column
-        n_cols = 1
-        show_nodes = True
-    elif n <= usable_h * (usable_w // col_w_nodes):
-        # Multi-column with nodes
-        n_cols = min(usable_w // col_w_nodes, (n + usable_h - 1) // usable_h)
-        n_cols = max(1, n_cols)
-        show_nodes = True
-    else:
-        # Multi-column without nodes (compact)
-        n_cols = min(usable_w // col_w_compact, (n + usable_h - 1) // usable_h)
-        n_cols = max(1, n_cols)
-        show_nodes = False
-
-    show_nodes = False
-    max_node_w = 0
-
-    # Pre-pass: compute column widths from actual data
-    w_model = max((len(m) for m in models), default=6) + 1
-    w_vram = max((len(f'{stats[m].get("VRAM", "")}G') for m in models
-                  if stats[m].get('VRAM')), default=3) + 1
-    max_total = max((stats[m]['Total'] for m in models), default=9)
-    w_cnt = len(f'{max_total}/{max_total}') + 1
-    max_pd = max((pending.get(m, 0) for m in models), default=0)
-    w_dem = max(3, len(f'⏸{max_pd}') + 1) if max_pd else 2
-    # My jobs: find widest entry
-    w_my = 6
-    for m in models:
-        mg = my_gpus.get(m, {})
-        r, p = mg.get('R', 0), mg.get('PD', 0)
-        entry_w = 0
-        if r:
-            entry_w += len(f'▶{r}')
-        if p:
-            entry_w += len(f' ⏸{p}') if r else len(f'⏸{p}')
-        w_my = max(w_my, entry_w + 2)
-
-    col_widths = {
-        'model': w_model, 'vram': w_vram, 'bar': 14,
-        'cnt': w_cnt, 'dem': w_dem, 'my': w_my,
-    }
-
-    # Build model lines
     has_any_trend = bool(trends)
-    model_parts: List[Tuple[Text, Text]] = []  # (left_line, my_jobs_text)
+
+    # Build table
+    table = RichTable(show_header=False, show_edge=False, box=None,
+                      pad_edge=False, padding=(0, 1, 0, 0))
+    table.add_column('model', style='bold', no_wrap=True)
+    table.add_column('vram', style='bright_black', no_wrap=True)
+    table.add_column('emoji', no_wrap=True, width=2)
+    table.add_column('bar', no_wrap=True)
+    table.add_column('free', no_wrap=True)
+    table.add_column('dem', no_wrap=True)
+    if has_any_trend:
+        table.add_column('trend', no_wrap=True)
+    table.add_column('sep', no_wrap=True, width=1)
+    table.add_column('my', no_wrap=True)
+
     total_T = total_U = 0
     for m in models:
         d = stats[m]
-        total_T += d['Total']
-        total_U += d['Used']
-        model_parts.append(_build_model_line(m, d, pending, my_gpus, show_nodes,
-                                              trend=trends.get(m),
-                                              w_nodes=max_node_w,
-                                              has_any_trend=has_any_trend,
-                                              col_widths=col_widths))
+        T, U, F = d['Total'], d['Used'], d['Free']
+        total_T += T
+        total_U += U
+        pct = U / T if T else 0.0
+        uc = _util_color(pct)
 
-    # Compute fixed │ position from column widths (not from emoji rendering)
-    # emoji width is unreliable across terminals, so we use column sum + fixed emoji slot
-    emoji_slot = 3  # enough for any emoji (2 cells) + 1 space
-    max_left_w = (col_widths['model'] + col_widths['vram'] + emoji_slot
-                  + col_widths['bar'] + col_widths['cnt'] + col_widths['dem']
-                  + (3 if has_any_trend else 0) + max_node_w)
+        emoji = _usage_emoji(pct * 100)
+        vram = d.get('VRAM')
 
-    # Assemble: pad left to max_left_w, append │ + my_jobs
-    # Use character count for padding (not display width) since emoji
-    # width is unreliable — the fixed max_left_w compensates
-    model_lines: List[Text] = []
-    max_my_w = 0
-    for left, my_t in model_parts:
-        line = Text()
-        line.append_text(left)
-        pad = max_left_w - len(left.plain)
-        if pad > 0:
-            line.append(' ' * pad)
-        line.append('│', style='bright_black')
-        line.append(' ')
-        line.append_text(my_t)
-        model_lines.append(line)
-        my_w = _display_width(my_t.plain)
-        if my_w > max_my_w:
-            max_my_w = my_w
+        cnt_t = Text()
+        cnt_t.append(f'{F}', style=f'bold {uc}')
+        cnt_t.append(f'/{T}', style='bright_black')
 
-    # Pad my-jobs section to uniform width
-    for ml in model_lines:
-        cur = _display_width(ml.plain)
-        target = max_left_w + 2 + max_my_w  # left + │ + space + my_jobs
-        pad = max(0, target - cur)
-        if pad:
-            ml.append(' ' * pad)
+        pd = pending.get(m, 0)
+        dem_t = Text()
+        if pd:
+            pressure = pd / max(F, 1)
+            dc = 'red' if pressure >= 2 else ('yellow' if pressure >= 1 else 'bright_black')
+            dem_t.append(f'⏸{pd}', style=dc)
 
-    actual_line_w = max((_display_width(ml.plain) for ml in model_lines), default=40)
-    rows_per_col = (n + n_cols - 1) // n_cols
-    sep = Text('  │ ', style='bright_black')
+        trend_t = Text()
+        trend = trends.get(m)
+        if trend:
+            arrow, delta = trend
+            trend_t.append(f'{arrow}{delta}', style='bold green' if arrow == '↑' else 'bold red')
 
-    output_lines: List[Text] = []
-    for row_i in range(rows_per_col):
-        line = Text()
-        for col_i in range(n_cols):
-            idx = col_i * rows_per_col + row_i
-            if col_i > 0:
-                line.append_text(sep)
-            if idx < n:
-                ml = model_lines[idx]
-                pad = max(0, actual_line_w - _display_width(ml.plain))
-                line.append_text(ml)
-                if pad > 0:
-                    line.append(' ' * pad)
-            else:
-                line.append(' ' * actual_line_w)
-        output_lines.append(line)
+        mg = my_gpus.get(m, {})
+        my_r, my_pd = mg.get('R', 0), mg.get('PD', 0)
+        my_t = Text()
+        if my_r:
+            my_t.append(f'▶{my_r}', style='bold green')
+        if my_pd:
+            if my_r:
+                my_t.append(' ')
+            my_t.append(f'⏸{my_pd}', style='bold yellow')
 
-    # Total row with dark gray background spanning full width
+        row = [
+            Text(m, style=f'bold {uc}'),
+            Text(f'{vram}G', style='bright_black') if vram else Text(''),
+            Text(emoji),
+            _bar(U, T, 14),
+            cnt_t,
+            dem_t,
+        ]
+        if has_any_trend:
+            row.append(trend_t)
+        row.append(Text('│', style='bright_black'))
+        row.append(my_t)
+        table.add_row(*row)
+
+    # Total row
     total_pct = total_U / total_T if total_T else 0.0
     uc = _util_color(total_pct)
     bg = 'on #2a2a2a'
-    total_line = Text(style=bg)
-    tname = Text()
-    tname.append('Total', style=f'bold {uc} {bg}')
+    total_emoji = _usage_emoji(total_pct * 100)
     tcnt = Text()
     tcnt.append(f'{total_T - total_U}', style=f'bold {uc} {bg}')
     tcnt.append(f'/{total_T}', style=f'bright_black {bg}')
-    total_line.append_text(_col(tname, col_widths['model']))
-    total_line.append_text(_col(Text('', style=bg), col_widths['vram']))
-    total_emoji = Text(_usage_emoji(total_pct * 100) or '', style=bg)
-    total_line.append_text(_col(total_emoji, 4))
-    total_line.append_text(_bar(total_U, total_T, col_widths['bar']))
-    total_line.append_text(_col(tcnt, col_widths['cnt']))
-    # Pad to same │ position as model lines (use len, not display_width — matches model rows)
-    cur_len = len(total_line.plain)
-    target_len = max_left_w
-    if cur_len < target_len:
-        total_line.append(' ' * (target_len - cur_len), style=bg)
-    total_line.append('│', style='bright_black')
     total_my_r = sum(v.get('R', 0) for v in my_gpus.values())
     total_my_pd = sum(v.get('PD', 0) for v in my_gpus.values())
     my_total = Text()
-    my_total.append(' ')
     if total_my_r:
         my_total.append(f'▶{total_my_r}', style='bold green')
     if total_my_pd:
         if total_my_r:
             my_total.append(' ')
         my_total.append(f'⏸{total_my_pd}', style='bold yellow')
-    total_line.append_text(my_total)
-    cur_w2 = _display_width(total_line.plain)
-    if cur_w2 < actual_line_w:
-        total_line.append(' ' * (actual_line_w - cur_w2))
-    output_lines.append(total_line)
+    total_row = [
+        Text('Total', style=f'bold {uc} {bg}'),
+        Text('', style=bg),
+        Text(total_emoji if total_emoji else '', style=bg),
+        _bar(total_U, total_T, 14),
+        tcnt,
+        Text('', style=bg),
+    ]
+    if has_any_trend:
+        total_row.append(Text('', style=bg))
+    total_row.append(Text('│', style='bright_black'))
+    total_row.append(my_total)
+    table.add_row(*total_row)
 
     subtitle = f'[dim]{user}[/dim]'
-
-    content = Text('\n').join(output_lines)
+    content = table
 
     return Panel(
         content,
