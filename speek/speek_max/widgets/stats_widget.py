@@ -664,9 +664,8 @@ class StatsWidget(Widget):
                 )
 
                 def on_chunk(rows, done: int, total: int) -> None:
-                    # For user dim, main chart shows ALL users (no filter)
-                    ts_fval = '' if dim == 'user' else fval
-                    ts = _compute_timeseries(rows, start, end, dim, ts_fval, n_buckets)
+                    # Main chart always shows cluster-wide total (same as Cluster tab)
+                    ts = _compute_timeseries(rows, start, end, 'cluster', '', n_buckets)
                     bd = _compute_breakdown(rows, dim)
                     pg = _compute_per_group_timeseries(rows, start, end, dim, n_buckets) if done == total else {}
                     lbl = f'[dim]{done}/{total} days…[/dim]' if done < total else ''
