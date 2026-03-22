@@ -113,14 +113,17 @@ def _time_zone_parts(zone_idx: int) -> tuple:
     """Return (age_label, date_str) for a divider row."""
     from datetime import timedelta
     now = datetime.now()
-    bounds = [3600, 86400, 3*86400, 7*86400, float('inf')]
     labels = ['< 1h', 'today', '1–3d', '3–7d', '> 7d']
     age = labels[min(zone_idx, len(labels)-1)]
-    if zone_idx >= 1:
-        secs = bounds[zone_idx]
-        dt = now - timedelta(seconds=secs) if secs != float('inf') else now - timedelta(seconds=bounds[zone_idx - 1])
-        return age, dt.strftime('%y-%m-%d')
-    return age, now.strftime('%H:%M')
+    if zone_idx == 0:
+        return age, now.strftime('%H:%M')
+    if zone_idx == 1:
+        return age, now.strftime('%y-%m-%d')
+    # Older zones: show the start date of that range
+    range_starts = [0, 0, 86400, 3*86400, 7*86400]
+    secs = range_starts[min(zone_idx, len(range_starts)-1)]
+    dt = now - timedelta(seconds=secs)
+    return age, dt.strftime('%y-%m-%d')
 
 _TIME_ZONE_BOUNDS = [
     (3600,         '< 1h'),
