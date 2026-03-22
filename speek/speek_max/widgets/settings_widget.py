@@ -319,6 +319,34 @@ class SettingsWidget(Widget):
         except Exception:
             pass
 
+    def _lock_checkbox(self, sw_id: str, message: str) -> None:
+        """Disable a checkbox and replace its description with a message."""
+        try:
+            cb = self.query_one(f'#{sw_id}', Checkbox)
+            cb.value = False
+            cb.disabled = True
+            row = cb.parent
+            if row is None:
+                return
+            for child in row.children:
+                if isinstance(child, Static) and 'config-desc' in child.classes:
+                    child.update(message)
+                    break
+        except Exception:
+            pass
+
+    def _apply_probe_locks(self) -> None:
+        """Disable checkboxes for commands/features the probe found unavailable."""
+        locked = getattr(self.app, '_probe_locked', set())
+        if not locked:
+            return
+        for sw_id, attr, _desc in _CMD_ROWS:
+            if attr in locked:
+                self._lock_checkbox(sw_id, '[dim](unavailable on this cluster)[/dim]')
+        for sw_id, attr, _desc, _cmd_attr in _FEAT_ROWS:
+            if attr in locked:
+                self._lock_checkbox(sw_id, '[dim](unavailable — requires disabled command)[/dim]')
+
     def _update_hint(self, theme_name: str) -> None:
         kind = 'light' if theme_name == 'manuscript' else 'dark'
         self.query_one('#config-hint', Static).update(

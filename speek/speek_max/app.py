@@ -171,16 +171,39 @@ class SpeekMax(App[None]):
         yield CommandBar()
         yield Footer()
 
+    def _apply_probe_overrides(self, probe: dict) -> None:
+        """Disable commands/features that the probe found unavailable."""
+        from speek.speek_max.widgets.settings_widget import _CMD_ROWS, _FEAT_ROWS
+        cmds = probe.get('commands', {})
+        self._probe_locked: set = set()
+        for _sw_id, attr, _desc in _CMD_ROWS:
+            cmd_name = _sw_id.replace('cmd-', '')
+            entry = cmds.get(cmd_name, {})
+            available = entry.get('ok', True) if isinstance(entry, dict) else bool(entry)
+            if not available:
+                setattr(self, attr, False)
+                self._probe_locked.add(attr)
+        for _sw_id, attr, _desc, cmd_attr in _FEAT_ROWS:
+            if cmd_attr in self._probe_locked:
+                setattr(self, attr, False)
+                self._probe_locked.add(attr)
+
     def _startup_probe(self) -> None:
         """Run in a worker thread: load or refresh probe cache, apply to slurm fields."""
         from speek.speek_max.probe import get_probe_results
         from speek.speek_max import slurm as _slurm
         probe = get_probe_results()   # fast if cache is fresh; runs probes if not
         _slurm.apply_probe(probe)
-        # Refresh the Info tab if it's been mounted
+        self._apply_probe_overrides(probe)
+
+        # Refresh the Info tab and apply probe locks to Settings UI
         def _refresh() -> None:
             try:
                 self.query_one(SysInfoWidget)._render_results()
+            except Exception:
+                pass
+            try:
+                self.query_one(SettingsWidget)._apply_probe_locks()
             except Exception:
                 pass
         self.call_from_thread(_refresh)
