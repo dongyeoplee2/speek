@@ -29,6 +29,8 @@ _CACHE_FILES: list[tuple[str, str]] = [
     ('~/.config/speek-max/command_history.json', 'Shell command history'),
     ('~/.config/speek-max/commands.yaml',        'User-defined command aliases'),
     ('~/.cache/speek/history_read.json',         'Read/unread state for job events'),
+    ('~/.cache/speek/oom_verdicts.json',         'OOM detection verdicts'),
+    ('~/.cache/speek/job_transitions.json',      'Job state transition cache'),
     ('~/.config/speek/submit_store.json',        'Legacy submit widget store'),
 ]
 
@@ -157,12 +159,16 @@ class SysInfoWidget(Widget):
             self._confirm_delete_cache()
 
     def action_reprobe(self) -> None:
-        self.query_one('#si-content', Static).update('[dim]Probing SLURM cluster…[/]')
+        try:
+            self.query_one('#si-content', Static).update('[dim]Probing SLURM cluster…[/]')
+        except Exception:
+            pass
         self.run_worker(self._run_probe, thread=True, group='reprobe')
 
     def _run_probe(self) -> None:
         from speek.speek_max.probe import get_probe_results
         from speek.speek_max import slurm as _slurm
+        _slurm.clear_all_caches()
         results = get_probe_results(force=True)
         _slurm.apply_probe(results)
         self.app.call_from_thread(self._render_results)
@@ -457,6 +463,20 @@ class SysInfoWidget(Widget):
         cache_table.add_column('size', justify='right', min_width=8)
         cache_table.add_column('path', style='dim', no_wrap=True)
         cache_table.add_column('desc', style='dim')
+
+        # In-memory cache stats
+        try:
+            from speek.speek_max.slurm import get_cache_stats
+            stats = get_cache_stats()
+            total_entries = sum(stats.values())
+            cache_table.add_row(
+                f'[{c_ok}]●[/]', str(total_entries),
+                'In-memory', f'[{c_dim}]entries across {len(stats)} caches[/]',
+            )
+        except Exception:
+            pass
+
+        # Persistent cache files
         total_bytes = 0
         for raw_path, description in _CACHE_FILES:
             p = Path(raw_path).expanduser()
@@ -473,6 +493,26 @@ class SysInfoWidget(Widget):
                     _short_path(raw_path), f'[{c_dim}]{description}[/]',
                 )
         cache_table.add_row('', f'[bold]{_fmt_size(total_bytes)}[/bold]', '[bold]Total[/bold]', '')
+
+        # Last cleared timestamp
+        try:
+            from speek.speek_max.slurm import get_last_cache_clear
+            ts = get_last_cache_clear()
+            if ts is not None:
+                import time as _time
+                ago = _time.monotonic() - ts
+                if ago < 60:
+                    label = f'{int(ago)}s ago'
+                elif ago < 3600:
+                    label = f'{int(ago / 60)}m ago'
+                else:
+                    label = f'{int(ago / 3600)}h ago'
+                cache_table.add_row(
+                    '', '', f'[{c_dim}]Last cleared[/]', f'[{c_dim}]{label}[/]',
+                )
+        except Exception:
+            pass
+
         try:
             self.query_one('#si-cache', Static).update(cache_table)
         except Exception:
@@ -491,6 +531,12 @@ class SysInfoWidget(Widget):
         )
 
     def _delete_all_cache(self) -> None:
+        # Clear in-memory caches first
+        try:
+            from speek.speek_max.slurm import clear_all_caches
+            clear_all_caches()
+        except Exception:
+            pass
         deleted = 0
         for raw_path, _ in _CACHE_FILES:
             p = Path(raw_path).expanduser()
@@ -501,5 +547,5 @@ class SysInfoWidget(Widget):
             except Exception:
                 pass
         self.app.notify(
-            f'Deleted {deleted} cache file(s)', title='Cache cleared')
+            f'Deleted {deleted} cache file(s) + in-memory caches', title='Cache cleared')
         self._render_cache_info()

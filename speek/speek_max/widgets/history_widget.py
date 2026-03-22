@@ -700,12 +700,20 @@ class HistoryWidget(FoldableTableMixin, Widget):
 
     @classmethod
     def _save_oom_disk(cls) -> None:
-        """Persist OOM verdicts for completed jobs to disk."""
+        """Persist OOM verdicts for completed jobs to disk.
+
+        Prunes to 5000 entries max (keeping most recent job IDs).
+        """
         try:
             import json
+            data = cls._oom_scan_cache
+            if len(data) > 5000:
+                # Keep most recent 5000 (highest job IDs)
+                sorted_keys = sorted(data.keys(), key=lambda k: int(k) if k.isdigit() else 0)
+                data = {k: data[k] for k in sorted_keys[-5000:]}
+                cls._oom_scan_cache = data
             cls._OOM_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            # Only save completed jobs (running jobs may change)
-            cls._OOM_CACHE_FILE.write_text(json.dumps(cls._oom_scan_cache))
+            cls._OOM_CACHE_FILE.write_text(json.dumps(data))
         except Exception:
             pass
 

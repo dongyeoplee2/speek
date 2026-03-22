@@ -192,6 +192,47 @@ class SettingsWidget(Widget):
                         )
                         yield Static('duration for new event row highlight', classes='config-desc')
 
+                # ── Cache ─────────────────────────────────────────────
+                yield Label('── Cache ──', classes='config-section-header')
+                with Vertical(classes='config-card'):
+                    yield Static('', id='cache-info-display', markup=True,
+                                 classes='config-desc')
+                    with Horizontal(classes='config-row'):
+                        yield Label('OOM retention', classes='config-label')
+                        yield SpeekSelect(
+                            [('7 days', 7), ('30 days', 30), ('90 days', 90),
+                             ('Forever', 0)],
+                            value=0,
+                            id='cache-oom-retention-select',
+                            allow_blank=False,
+                        )
+                        yield Static('how long to keep OOM verdicts', classes='config-desc')
+                    with Horizontal(classes='config-row'):
+                        yield Label('Transition retention', classes='config-label')
+                        yield SpeekSelect(
+                            [('7 days', 7), ('30 days', 30), ('90 days', 90),
+                             ('Forever', 0)],
+                            value=0,
+                            id='cache-transition-retention-select',
+                            allow_blank=False,
+                        )
+                        yield Static('how long to keep job transitions', classes='config-desc')
+                    with Horizontal(classes='config-row'):
+                        yield Button('Clear OOM verdicts', id='cache-clear-oom-btn',
+                                     classes='config-cache-btn')
+                        yield Button('Clear job transitions', id='cache-clear-transitions-btn',
+                                     classes='config-cache-btn')
+                    with Horizontal(classes='config-row'):
+                        yield Button('Clear read/unread state', id='cache-clear-read-btn',
+                                     classes='config-cache-btn')
+                        yield Button('Clear all caches', id='cache-clear-all-btn',
+                                     classes='config-cache-btn')
+                    with Horizontal(classes='config-row'):
+                        yield Button('Apply cache settings', id='cache-apply-btn',
+                                     classes='config-cache-btn')
+                        yield Static('', id='cache-status', markup=True,
+                                     classes='config-desc')
+
                 # ── Session ───────────────────────────────────────────
                 yield Label('── Session ──', classes='config-section-header')
                 with Vertical(classes='config-card'):
@@ -239,6 +280,8 @@ class SettingsWidget(Widget):
             ('#ping-duration-select',    '_ping_duration'),
             ('#event-fade-select',       '_event_fade'),
             ('#max-read-ids-select',     '_max_read_ids'),
+            ('#cache-oom-retention-select',       '_cache_oom_retention'),
+            ('#cache-transition-retention-select', '_cache_transition_retention'),
         ]:
             val = getattr(self.app, attr, None)
             if val is not None:
@@ -377,6 +420,8 @@ class SettingsWidget(Widget):
         '_event_fade':          600,
         '_time_format':         'relative',
         '_max_read_ids':        2000,
+        '_cache_oom_retention':       0,
+        '_cache_transition_retention': 0,
     }
 
     def _gather_settings(self) -> dict:
@@ -398,6 +443,8 @@ class SettingsWidget(Widget):
             '_history_refresh':     app._history_refresh,
             '_history_lookback_days': app._history_lookback_days,
             '_issue_hours':         app._issue_hours,
+            '_cache_oom_retention':       getattr(app, '_cache_oom_retention', 0),
+            '_cache_transition_retention': getattr(app, '_cache_transition_retention', 0),
         }
 
     def _apply_settings(self, settings: dict) -> None:
@@ -439,6 +486,8 @@ class SettingsWidget(Widget):
             ('#ping-duration-select',    '_ping_duration'),
             ('#event-fade-select',       '_event_fade'),
             ('#max-read-ids-select',     '_max_read_ids'),
+            ('#cache-oom-retention-select',       '_cache_oom_retention'),
+            ('#cache-transition-retention-select', '_cache_transition_retention'),
         ]:
             try:
                 self.query_one(sel_id, SpeekSelect).value = getattr(app, attr)
@@ -484,6 +533,166 @@ class SettingsWidget(Widget):
                 ConfirmationModal('Reset all settings to defaults?'),
                 _on_confirm,
             )
+        elif bid == 'cache-clear-oom-btn':
+            self._confirm_clear_cache('OOM verdicts', self._do_clear_oom)
+        elif bid == 'cache-clear-transitions-btn':
+            self._confirm_clear_cache('job transitions', self._do_clear_transitions)
+        elif bid == 'cache-clear-read-btn':
+            self._confirm_clear_cache('read/unread state', self._do_clear_read)
+        elif bid == 'cache-clear-all-btn':
+            self._confirm_clear_cache('ALL caches (in-memory + disk)', self._do_clear_all)
+        elif bid == 'cache-apply-btn':
+            self._apply_cache_settings()
+
+    # ── Cache management ────────────────────────────────────────────────────
+
+    _CACHE_DIR = Path.home() / '.cache' / 'speek'
+
+    def _confirm_clear_cache(self, label: str, action) -> None:
+        from speek.speek_max.widgets.confirmation import ConfirmationModal
+
+        def _on_confirm(confirmed: bool) -> None:
+            if confirmed:
+                action()
+
+        self.app.push_screen(
+            ConfirmationModal(f'Clear {label}?'),
+            _on_confirm,
+        )
+
+    def _do_clear_oom(self) -> None:
+        try:
+            f = self._CACHE_DIR / 'oom_verdicts.json'
+            if f.exists():
+                f.unlink()
+            # Also clear in-memory cache
+            from speek.speek_max.widgets.history_widget import HistoryWidget
+            HistoryWidget._oom_scan_cache.clear()
+            HistoryWidget._oom_disk_loaded = False
+        except Exception:
+            pass
+        self.app.notify('OOM verdicts cleared', title='Cache')
+        self._refresh_cache_info()
+
+    def _do_clear_transitions(self) -> None:
+        try:
+            f = self._CACHE_DIR / 'job_transitions.json'
+            if f.exists():
+                f.unlink()
+        except Exception:
+            pass
+        self.app.notify('Job transitions cleared', title='Cache')
+        self._refresh_cache_info()
+
+    def _do_clear_read(self) -> None:
+        try:
+            f = self._CACHE_DIR / 'history_read.json'
+            if f.exists():
+                f.unlink()
+        except Exception:
+            pass
+        self.app.notify('Read/unread state cleared', title='Cache')
+        self._refresh_cache_info()
+
+    def _do_clear_all(self) -> None:
+        # Clear in-memory caches
+        try:
+            from speek.speek_max.slurm import clear_all_caches
+            clear_all_caches()
+        except Exception:
+            pass
+        # Clear disk caches
+        self._do_clear_oom()
+        self._do_clear_transitions()
+        self._do_clear_read()
+        self.app.notify('All caches cleared', title='Cache')
+        self._refresh_cache_info()
+
+    def _apply_cache_settings(self) -> None:
+        """Apply cache retention settings and save to config."""
+        try:
+            oom_ret = self.query_one('#cache-oom-retention-select', SpeekSelect).value
+            trans_ret = self.query_one('#cache-transition-retention-select', SpeekSelect).value
+            self.app._cache_oom_retention = int(oom_ret) if oom_ret is not None else 0
+            self.app._cache_transition_retention = int(trans_ret) if trans_ret is not None else 0
+            self._save_settings()
+            self.query_one('#cache-status', Static).update(
+                '[bold green]Cache settings applied[/bold green]')
+        except Exception as e:
+            try:
+                self.query_one('#cache-status', Static).update(
+                    f'[bold red]Error: {e}[/bold red]')
+            except Exception:
+                pass
+
+    def _refresh_cache_info(self) -> None:
+        """Update the cache info display in the settings panel."""
+        try:
+            self._update_cache_info_display()
+        except Exception:
+            pass
+
+    def _update_cache_info_display(self) -> None:
+        """Render current cache sizes into the info display widget."""
+        lines = []
+        # In-memory cache stats
+        try:
+            from speek.speek_max.slurm import get_cache_stats
+            stats = get_cache_stats()
+            total_entries = sum(stats.values())
+            lines.append(f'[dim]In-memory:[/dim] {total_entries} entries across {len(stats)} caches')
+        except Exception:
+            lines.append('[dim]In-memory:[/dim] unavailable')
+
+        # Disk cache sizes
+        cache_files = [
+            ('oom_verdicts.json', 'OOM verdicts'),
+            ('job_transitions.json', 'Job transitions'),
+            ('history_read.json', 'Read/unread state'),
+        ]
+        for fname, label in cache_files:
+            p = self._CACHE_DIR / fname
+            if p.exists():
+                try:
+                    size = p.stat().st_size
+                    data = json.loads(p.read_text())
+                    n = len(data) if isinstance(data, dict) else (
+                        len(data.get('read_ids', [])) if isinstance(data, dict) else 0)
+                    if isinstance(data, dict) and 'read_ids' in data:
+                        n = len(data['read_ids'])
+                    elif isinstance(data, dict):
+                        n = len(data)
+                    sz = f'{size / 1024:.1f} KB' if size >= 1024 else f'{size} B'
+                    lines.append(f'[dim]{label}:[/dim] {n} entries, {sz}')
+                except Exception:
+                    lines.append(f'[dim]{label}:[/dim] exists (unreadable)')
+            else:
+                lines.append(f'[dim]{label}:[/dim] empty')
+
+        # Last cleared timestamp
+        try:
+            from speek.speek_max.slurm import get_last_cache_clear
+            import time as _time
+            ts = get_last_cache_clear()
+            if ts is not None:
+                ago = _time.monotonic() - ts
+                if ago < 60:
+                    lines.append(f'[dim]Last cleared:[/dim] {int(ago)}s ago')
+                elif ago < 3600:
+                    lines.append(f'[dim]Last cleared:[/dim] {int(ago / 60)}m ago')
+                else:
+                    lines.append(f'[dim]Last cleared:[/dim] {int(ago / 3600)}h ago')
+        except Exception:
+            pass
+
+        try:
+            self.query_one('#cache-info-display', Static).update('\n'.join(lines))
+        except Exception:
+            pass
+
+    def on_show(self) -> None:
+        """Refresh cache info display when the settings panel becomes visible."""
+        self._refresh_cache_info()
 
     @staticmethod
     def load_saved_settings() -> dict:

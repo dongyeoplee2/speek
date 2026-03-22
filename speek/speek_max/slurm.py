@@ -24,6 +24,20 @@ _DT_FMT   = '%Y-%m-%dT%H:%M:%S'
 _scontrol_cache: Dict[str, Tuple[float, str]] = {}
 _SCONTROL_TTL = 15.0  # seconds
 
+# ── LRU pruning constants ─────────────────────────────────────────────────────
+
+_MAX_SCONTROL_CACHE = 200
+_MAX_SACCT_DETAILS_CACHE = 500
+_MAX_STATS_CACHE = 100
+_MAX_USER_SHARE_CACHE = 50
+
+
+def _prune_cache(cache: dict, max_size: int) -> None:
+    """Evict oldest entries if cache exceeds max size."""
+    while len(cache) > max_size:
+        oldest_key = min(cache, key=lambda k: cache[k][0])
+        del cache[oldest_key]
+
 
 def _scontrol_show_job(job_id: str) -> Optional[str]:
     """Run `scontrol show job <id>` with a 15-second TTL cache."""
@@ -39,6 +53,7 @@ def _scontrol_show_job(job_id: str) -> Optional[str]:
             text=True, stderr=subprocess.DEVNULL,
         )
         _scontrol_cache[job_id] = (now, raw)
+        _prune_cache(_scontrol_cache, _MAX_SCONTROL_CACHE)
         return raw
     except Exception:
         _scontrol_cache.pop(job_id, None)
@@ -257,23 +272,13 @@ def fetch_all_priorities() -> Dict[str, Dict]:
 
 
 def fetch_fairshares() -> Dict[str, float]:
-    """Return {username: fairshare_score} from sshare."""
-    try:
-        out = subprocess.check_output(
-            ['sshare', '-al', '-o', 'User,FairShare', '--noheader'],
-            text=True, stderr=subprocess.DEVNULL, timeout=8,
-        )
-    except Exception:
-        return {}
-    result = {}
-    for ln in out.splitlines():
-        parts = ln.split()
-        if len(parts) >= 2:
-            try:
-                result[parts[0].strip()] = float(parts[1].strip())
-            except ValueError:
-                pass
-    return result
+    """Return {username: fairshare_score} from sshare.
+
+    Delegates to fetch_all_shares() to reuse its cache and avoid duplicate
+    subprocess calls.
+    """
+    shares = fetch_all_shares()
+    return {user: info.get('fairshare', 0.0) for user, info in shares.items()}
 
 
 # ── Job statistics ─────────────────────────────────────────────────────────────
@@ -773,6 +778,7 @@ def _sacct_job_details(job_id: str) -> Dict[str, str]:
 
     _sacct_merge_batch(result, batch)
     _sacct_details_cache[job_id] = (now, result)
+    _prune_cache(_sacct_details_cache, _MAX_SACCT_DETAILS_CACHE)
     return result
 
 
@@ -845,11 +851,22 @@ def fetch_job_details_and_log_path(
 
 # ── History ───────────────────────────────────────────────────────────────────
 
+_history_cache: Dict[int, Tuple[float, List]] = {}
+_history_lock = _threading.Lock()
+_HISTORY_TTL = 30.0  # seconds
+
+
 def fetch_history(days: int) -> List[Tuple]:
     """Returns sacct history tuples: (jid, name, partition, start, elapsed, state, exit_code, alloc_tres, nodelist).
 
     For PENDING jobs, 'start' is the submit time (since Start is 'Unknown').
+    Results are cached per days value for 30 seconds.
     """
+    now = _time.monotonic()
+    with _history_lock:
+        entry = _history_cache.get(days)
+        if entry and now - entry[0] < _HISTORY_TTL:
+            return entry[1]
     start = (datetime.now() - timedelta(days=days)).strftime(_DT_FMT)
     try:
         out = subprocess.check_output(
@@ -882,6 +899,8 @@ def fetch_history(days: int) -> List[Tuple]:
             alloc_tres.strip(),
             nodelist.strip(),
         ))
+    with _history_lock:
+        _history_cache[days] = (_time.monotonic(), rows)
     return rows
 
 
@@ -1505,6 +1524,7 @@ def _stats_get(key: tuple, ttl: float, fn) -> object:
             return val
     val = fn()
     _stats_cache[key] = (now, val)
+    _prune_cache(_stats_cache, _MAX_STATS_CACHE)
     return val
 
 
@@ -2069,13 +2089,24 @@ def fetch_job_gpu_stats(job_id: str, nodelist: str) -> Dict:
 
 # ── Partitions ────────────────────────────────────────────────────────────────
 
+_partitions_cache: Optional[Tuple[float, List[str]]] = None
+_PARTITIONS_TTL = 300.0  # seconds — partition list rarely changes
+
+
 def get_partitions() -> List[str]:
+    """Return sorted partition names from sinfo. Cached for 300 seconds."""
+    global _partitions_cache
+    now = _time.monotonic()
+    if _partitions_cache and now - _partitions_cache[0] < _PARTITIONS_TTL:
+        return _partitions_cache[1]
     try:
         out = subprocess.check_output(
             ['sinfo', '-h', '-o', '%P'],
             text=True, stderr=subprocess.DEVNULL,
         )
-        return sorted({p.strip().rstrip('*') for p in out.splitlines() if p.strip()})
+        result = sorted({p.strip().rstrip('*') for p in out.splitlines() if p.strip()})
+        _partitions_cache = (_time.monotonic(), result)
+        return result
     except Exception:
         return []
 
@@ -2334,6 +2365,7 @@ def fetch_user_share(user: str = '') -> Dict:
 
     with _user_share_lock:
         _user_share_cache[user] = (_time.monotonic(), result)
+        _prune_cache(_user_share_cache, _MAX_USER_SHARE_CACHE)
     return result
 
 
@@ -2411,3 +2443,76 @@ def describe_priority_factors(config: Dict) -> List[Tuple[str, str, str]]:
         result.append((factor, w_str, desc))
 
     return result
+
+
+# ── Cache management ──────────────────────────────────────────────────────────
+
+_last_cache_clear: Optional[float] = None   # monotonic timestamp
+
+
+def get_cache_stats() -> Dict[str, int]:
+    """Return approximate entry counts for all in-memory caches."""
+    return {
+        'scontrol':       len(_scontrol_cache),
+        'sacct_details':  len(_sacct_details_cache),
+        'stats':          len(_stats_cache),
+        'user_share':     len(_user_share_cache),
+        'history':        len(_history_cache),
+        'issue':          len(_issue_cache),
+        'issue_ts':       len(_issue_ts_cache),
+        'queue':          1 if _queue_cache is not None else 0,
+        'cluster_stats':  1 if _cluster_stats_cache is not None else 0,
+        'partitions':     1 if _partitions_cache is not None else 0,
+        'priorities':     1 if _priorities_cache is not None else 0,
+        'priority_config': 1 if _priority_config_cache is not None else 0,
+        'all_shares':     1 if _all_shares_cache is not None else 0,
+        'sreport':        1 if _sreport_cache is not None else 0,
+    }
+
+
+def get_last_cache_clear() -> Optional[float]:
+    """Return monotonic timestamp of last clear_all_caches() call, or None."""
+    return _last_cache_clear
+
+
+def clear_all_caches() -> None:
+    """Reset all in-memory caches. Called on Ctrl+R re-probe or manual clear."""
+    global _queue_cache, _job_stats_cache, _priorities_cache
+    global _cluster_stats_cache, _partitions_cache
+    global _priority_config_cache, _priority_factors_cache
+    global _all_shares_cache, _sreport_cache
+    global _scontrol_jobs_cache, _last_cache_clear
+
+    with _queue_lock:
+        _queue_cache = None
+    with _job_stats_lock:
+        _job_stats_cache = None
+    with _priorities_lock:
+        _priorities_cache = None
+    with _cluster_stats_lock:
+        _cluster_stats_cache = None
+    with _priority_config_lock:
+        _priority_config_cache = None
+    with _priority_factors_lock:
+        _priority_factors_cache = None
+    with _all_shares_lock:
+        _all_shares_cache = None
+    with _sreport_lock:
+        _sreport_cache = None
+    with _scontrol_jobs_lock:
+        _scontrol_jobs_cache = None
+    with _history_lock:
+        _history_cache.clear()
+    with _my_jobs_lock:
+        _my_jobs_cache.clear()
+    with _user_share_lock:
+        _user_share_cache.clear()
+
+    _partitions_cache = None
+    _scontrol_cache.clear()
+    _sacct_details_cache.clear()
+    _stats_cache.clear()
+    _issue_cache.clear()
+    _issue_ts_cache.clear()
+
+    _last_cache_clear = _time.monotonic()
