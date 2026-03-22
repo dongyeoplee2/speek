@@ -1186,6 +1186,21 @@ StatsWidget {
   }
 }
 
+#stats-user-chart {
+  height: auto;
+  min-height: 4;
+  width: 1fr;
+  background: $background;
+}
+
+#stats-user-legend {
+  height: 1;
+  width: 1fr;
+  background: $background;
+  color: $text-muted;
+  padding: 0 0 0 1;
+}
+
 #stats-x-axis {
   height: 1;
   padding: 0 0;
@@ -1226,30 +1241,11 @@ StatsWidget {
   background: $background;
 }
 
-#stats-dashboard-view {
-  height: 1fr;
-  width: 1fr;
-  background: $background;
-}
-
-#stats-chart-view {
-  height: 1fr;
-  width: 1fr;
-  background: $background;
-}
-
 #stats-breakdown-scroll {
-  height: auto;
+  height: 1fr;
   width: 1fr;
   background: $background;
   border-top: solid $accent 40%;
-}
-
-#stats-dashboard {
-  height: auto;
-  width: 1fr;
-  padding: 0 1;
-  background: $background;
 }
 
 .stats-group-row {

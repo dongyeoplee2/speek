@@ -1,9 +1,8 @@
 """stats_widget.py — GPU time-usage statistics: sparkline timeline + breakdown table."""
 from __future__ import annotations
 
-import time as _time
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 from rich.text import Text
 from rich.table import Table
@@ -21,6 +20,105 @@ _FILTER_BAR  = '#stats-filter-bar'
 _ISSUES_ID   = '#stats-issues'
 _SPARKLINE_ID  = '#stats-sparkline'
 _HOVER_INFO_ID = '#stats-hover-info'
+_STACKED_ID    = '#stats-user-chart'
+_LEGEND_ID     = '#stats-user-legend'
+
+# ── User color palette for stacked chart ──────────────────────────────────────
+
+_USER_COLORS = [
+    '#4A9FD9',  # blue
+    '#D9534F',  # red
+    '#5CB85C',  # green
+    '#F0AD4E',  # orange
+    '#9B59B6',  # purple
+    '#1ABC9C',  # teal
+    '#E74C3C',  # crimson
+    '#3498DB',  # sky blue
+    '#2ECC71',  # emerald
+    '#E67E22',  # carrot
+    '#8E44AD',  # amethyst
+    '#34495E',  # wet asphalt
+]
+
+
+def _render_stacked_chart(per_group_ts: Dict, peak: float, n_buckets: int) -> Text:
+    """Render a stacked bar chart as Rich Text with per-user colors."""
+    if not per_group_ts or peak <= 0:
+        return Text('')
+
+    # Sort users by total usage (descending) for consistent color assignment
+    users = sorted(
+        per_group_ts.keys(),
+        key=lambda u: sum(per_group_ts[u].get('buckets', [])),
+        reverse=True,
+    )
+    user_color = {u: _USER_COLORS[i % len(_USER_COLORS)] for i, u in enumerate(users)}
+
+    height = 4  # rows of block characters
+    lines: List[Text] = []
+
+    for row in range(height - 1, -1, -1):  # top row first
+        line = Text()
+        row_bottom = (row / height) * peak
+        row_top = ((row + 1) / height) * peak
+
+        for col in range(n_buckets):
+            # Gather each user's value at this bucket
+            segments = []
+            total = 0.0
+            for u in users:
+                val = 0.0
+                bkts = per_group_ts[u].get('buckets', [])
+                if col < len(bkts):
+                    val = bkts[col]
+                segments.append((u, val))
+                total += val
+
+            if total <= row_bottom:
+                line.append(' ')
+                continue
+
+            # Walk through stacked users to find who occupies this row cell
+            cumulative = 0.0
+            cell_color = user_color[users[-1]]  # fallback
+            # Determine the midpoint of the visible portion in this row
+            visible_mid = max(row_bottom, 0) + (min(total, row_top) - max(row_bottom, 0)) / 2
+
+            cumulative = 0.0
+            for u, val in segments:
+                cumulative += val
+                if cumulative > visible_mid:
+                    cell_color = user_color[u]
+                    break
+
+            # Choose block character based on fill fraction within this row
+            fill = min(total, row_top) - row_bottom
+            frac = fill / (row_top - row_bottom) if row_top > row_bottom else 0
+            blocks = ' ▁▂▃▄▅▆▇█'
+            idx = min(int(frac * 8 + 0.5), 8)
+            line.append(blocks[idx], style=cell_color)
+
+        lines.append(line)
+
+    result = Text('\n').join(lines)
+    return result
+
+
+def _build_user_legend(per_group_ts: Dict) -> Text:
+    """Build a color legend line for per-user stacked chart."""
+    users = sorted(
+        per_group_ts.keys(),
+        key=lambda u: sum(per_group_ts[u].get('buckets', [])),
+        reverse=True,
+    )
+    user_color = {u: _USER_COLORS[i % len(_USER_COLORS)] for i, u in enumerate(users)}
+    legend = Text()
+    for i, u in enumerate(users):
+        if i > 0:
+            legend.append('  ')
+        legend.append('●', style=user_color[u])
+        legend.append(f' {u}')
+    return legend
 
 # ── Time-range presets ─────────────────────────────────────────────────────────
 
@@ -211,211 +309,6 @@ def _build_issues(data: Dict, hours: int) -> Table:
     return t
 
 
-# ── Dashboard helpers ──────────────────────────────────────────────────────────
-
-_DASHBOARD_TTL = 30.0      # seconds — same as cluster stats
-_HEATMAP_TTL   = 300.0     # 5 min — historical data changes slowly
-_BAR_MAX_W     = 30        # max bar width in characters
-
-
-def _build_partition_bars(cluster_stats: Dict, job_stats: Dict) -> Text:
-    """Horizontal stacked bar chart: green=free, red=used, dim=remaining capacity."""
-    if not cluster_stats:
-        return Text('  No GPU data available', style='dim')
-
-    # Merge pending counts from job_stats into cluster_stats by model
-    pending_by_model: Dict[str, int] = {}
-    for model, jd in job_stats.get('by_model', {}).items():
-        pending_by_model[model] = jd.get('PD', 0)
-
-    # Sort by free GPUs descending (best option first)
-    entries = sorted(
-        cluster_stats.items(),
-        key=lambda kv: kv[1].get('Free', 0),
-        reverse=True,
-    )
-
-    max_total = max((d['Total'] for _, d in entries), default=1) or 1
-    name_w = max((len(n) for n, _ in entries), default=4)
-
-    t = Text()
-    t.append('  Where to submit?\n', style='bold')
-    for i, (model, d) in enumerate(entries):
-        total = d['Total']
-        free  = d['Free']
-        pend  = pending_by_model.get(model, 0)
-
-        bar_w = max(1, int(total / max_total * _BAR_MAX_W))
-        g = max(0, int(free / total * bar_w)) if total else 0
-        r = bar_w - g  # used GPUs portion
-
-        t.append(f'  {model:<{name_w}}  ', style='bold')
-        if g > 0:
-            t.append('█' * g, style='green')
-        if r > 0:
-            t.append('█' * r, style='red')
-        remaining = _BAR_MAX_W - bar_w
-        if remaining > 0:
-            t.append('░' * remaining, style='dim')
-        t.append(f'  {free:>2} free', style='green' if free > 0 else 'dim')
-        if pend > 0:
-            t.append(f'  ⏸{pend}', style='yellow')
-        if i < len(entries) - 1:
-            t.append('\n')
-    return t
-
-
-def _build_wait_estimate(cluster_stats: Dict, job_stats: Dict) -> Text:
-    """Estimated wait per partition based on free GPUs and pending jobs."""
-    if not cluster_stats:
-        return Text('')
-
-    pending_by_model: Dict[str, int] = {}
-    for model, jd in job_stats.get('by_model', {}).items():
-        pending_by_model[model] = jd.get('PD', 0)
-
-    avg_runtime_min = 60  # default 1 hour if sacct unavailable
-
-    entries = sorted(
-        cluster_stats.items(),
-        key=lambda kv: kv[1].get('Free', 0),
-        reverse=True,
-    )
-
-    name_w = max((len(n) for n, _ in entries), default=4)
-    wait_bar_max = 16
-
-    t = Text()
-    t.append('\n  Expected wait\n', style='bold')
-    for i, (model, d) in enumerate(entries):
-        total = d['Total']
-        free  = d['Free']
-        pend  = pending_by_model.get(model, 0)
-
-        # Estimate wait
-        if free > 0:
-            wait_min = 0
-            wait_label = 'instant'
-            color = 'green'
-        elif total > 0:
-            wait_min = int((pend / total) * avg_runtime_min)
-            if wait_min < 1:
-                wait_label = 'instant'
-                color = 'green'
-            elif wait_min < 60:
-                wait_label = f'~{wait_min} min'
-                color = 'yellow'
-            else:
-                hours = wait_min / 60
-                wait_label = f'~{hours:.0f}h'
-                color = 'red'
-        else:
-            wait_min = 0
-            wait_label = 'N/A'
-            color = 'dim'
-
-        bar_w = min(wait_bar_max, max(1, int(wait_min / max(avg_runtime_min * 2, 1) * wait_bar_max)))
-        if wait_min == 0:
-            bar_w = 1
-
-        t.append(f'  {model:<{name_w}}  ', style='bold')
-        bar_char = '▏' if bar_w == 1 and wait_min == 0 else '█'
-        t.append(bar_char * bar_w, style=color)
-        pad = wait_bar_max - bar_w
-        if pad > 0:
-            t.append(' ' * pad)
-        t.append(f'  {wait_label:<10s}', style=color)
-        t.append(f'{free} free, {pend} pending', style='dim')
-        if i < len(entries) - 1:
-            t.append('\n')
-    return t
-
-
-def _build_hourly_heatmap(hourly_data: Dict[str, List[float]]) -> Text:
-    """24-column heatmap of average GPU availability by hour-of-day per model."""
-    if not hourly_data:
-        return Text('')
-
-    # Shade characters by availability percentage
-    def _shade(pct: float) -> Tuple[str, str]:
-        if pct > 0.70:
-            return '██', 'green'
-        elif pct > 0.40:
-            return '▓▓', 'yellow'
-        elif pct > 0.20:
-            return '▒▒', '#ff8800'
-        else:
-            return '░░', 'red'
-
-    name_w = max((len(n) for n in hourly_data), default=4)
-
-    t = Text()
-    t.append('\n  Best time to submit (last 7d avg)\n', style='bold')
-    # Hour header — show every 2 hours
-    t.append(' ' * (name_w + 3))
-    for h in range(0, 24, 2):
-        t.append(f'{h:<4d}', style='dim')
-    t.append('\n')
-
-    for model, avail in sorted(hourly_data.items()):
-        t.append(f'  {model:<{name_w}}  ', style='bold')
-        for h in range(0, 24, 2):
-            pct = avail[h] if h < len(avail) else 0.5
-            ch, color = _shade(pct)
-            t.append(ch, style=color)
-        t.append('\n')
-    return t
-
-
-def _compute_hourly_heatmap(rows, cluster_stats: Dict) -> Dict[str, List[float]]:
-    """Compute avg GPU availability by hour-of-day per partition/model.
-
-    Returns {model: [availability_pct_for_each_hour] * 24}.
-    """
-    from collections import defaultdict
-
-    # Track GPU-seconds used per hour per partition
-    usage_per_hour: Dict[str, List[float]] = defaultdict(lambda: [0.0] * 24)
-    samples_per_hour: Dict[str, List[int]] = defaultdict(lambda: [0] * 24)
-
-    for row in rows:
-        # row: (jid, user, partition, nodelist, start_dt, end_dt, gpus, elapsed_secs, alloc_gres)
-        partition = row[2]
-        start_dt  = row[4]
-        end_dt    = row[5]
-        gpus      = row[6]
-
-        if not start_dt or not gpus:
-            continue
-        if end_dt is None:
-            end_dt = datetime.now()
-
-        # Walk through each hour the job spans
-        cur = start_dt
-        while cur < end_dt:
-            h = cur.hour
-            usage_per_hour[partition][h] += gpus
-            samples_per_hour[partition][h] += 1
-            cur += timedelta(hours=1)
-            if (cur - start_dt).total_seconds() > 7 * 86400:
-                break  # safety limit
-
-    # Convert to availability percentage
-    result: Dict[str, List[float]] = {}
-    for model, stats in cluster_stats.items():
-        total = stats.get('Total', 1) or 1
-        hours_avail = [0.5] * 24  # default 50% if no data
-        if model in usage_per_hour:
-            for h in range(24):
-                n = samples_per_hour[model][h]
-                if n > 0:
-                    avg_used = usage_per_hour[model][h] / n
-                    hours_avail[h] = max(0.0, min(1.0, 1.0 - avg_used / total))
-                # else keep default
-        result[model] = hours_avail
-    return result
-
-
 # ── Widget ─────────────────────────────────────────────────────────────────────
 
 class StatsWidget(Widget):
@@ -440,16 +333,12 @@ class StatsWidget(Widget):
         self._last_hover_idx: int = -1
         self._w_sparkline: Sparkline | None = None
         self._w_hover:     Static    | None = None
-        # Dashboard caches
-        self._dashboard_cache: Optional[Tuple[float, Text]] = None
-        self._heatmap_cache: Optional[Tuple[float, Dict[str, List[float]]]] = None
 
     # ── Compose ────────────────────────────────────────────────────────────────
 
     def compose(self) -> ComposeResult:
         # ── toolbar ───────────────────────────────────────────────────────────
         with Horizontal(id='stats-toolbar'):
-            yield Button('Now', id='stats-dim-now', classes='stats-dim-btn')
             for d in _DIMS:
                 yield Button(d.capitalize(), id=f'stats-dim-{d}',
                              classes='stats-dim-btn')
@@ -481,52 +370,47 @@ class StatsWidget(Widget):
             yield Button('Apply', id='stats-cust-apply',
                          classes='stats-apply-btn')
 
-        # ── Dashboard view (shown when "Now" selected) ────────────────────
-        with VerticalScroll(id='stats-dashboard-view'):
-            yield Static('', id='stats-dashboard', markup=True)
+        # ── chart area ────────────────────────────────────────────────────────
+        with Vertical(id='stats-chart-area'):
+            with Horizontal(id='stats-chart-header'):
+                yield Static('', id='stats-chart-title', markup=True)
+                yield Static('', id='stats-y-max', markup=True)
+            with Horizontal(id='stats-chart-body'):
+                yield Static('', id='stats-y-axis')
+                with Vertical(id='stats-chart-inner'):
+                    yield Sparkline([], id='stats-sparkline', summary_function=max)
+                    yield Static('', id='stats-user-chart')
+                    yield Static('', id='stats-user-legend')
+                    yield Static('', id='stats-x-axis')
+                    yield Static('', id='stats-hover-info', markup=True)
 
-        # ── Chart view (shown for Cluster/Partition/Node/User/Issues) ────
-        with VerticalScroll(id='stats-chart-view'):
-            # ── chart area ───────────────────────────────────────────────
-            with Vertical(id='stats-chart-area'):
-                with Horizontal(id='stats-chart-header'):
-                    yield Static('', id='stats-chart-title', markup=True)
-                    yield Static('', id='stats-y-max', markup=True)
-                with Horizontal(id='stats-chart-body'):
-                    yield Static('', id='stats-y-axis')
-                    with Vertical(id='stats-chart-inner'):
-                        yield Sparkline([], id='stats-sparkline', summary_function=max)
-                        yield Static('', id='stats-x-axis')
-                        yield Static('', id='stats-hover-info', markup=True)
+        # ── summary bar ───────────────────────────────────────────────────────
+        with Horizontal(id='stats-summary'):
+            yield Label('', id='stats-lbl-total',   markup=True)
+            yield Label('', id='stats-lbl-peak',    markup=True)
+            yield Label('', id='stats-lbl-jobs',    markup=True)
+            yield Label('', id='stats-lbl-loading', markup=True)
 
-            # ── summary bar ──────────────────────────────────────────────
-            with Horizontal(id='stats-summary'):
-                yield Label('', id='stats-lbl-total',   markup=True)
-                yield Label('', id='stats-lbl-peak',    markup=True)
-                yield Label('', id='stats-lbl-jobs',    markup=True)
-                yield Label('', id='stats-lbl-loading', markup=True)
+        # ── per-group sparklines (scrollable) ────────────────────────────────
+        with VerticalScroll(id='stats-breakdown-scroll'):
+            pass  # populated dynamically
 
-            # ── per-group sparklines ─────────────────────────────────────
-            with Vertical(id='stats-breakdown-scroll'):
-                pass  # populated dynamically
-
-            # ── issue stats (chart + table) ──────────────────────────────
-            with Vertical(id='stats-issues'):
-                yield Static('', id='stats-issue-chart', markup=True)
-                yield Static('', id='stats-issue-table', markup=True)
+        # ── issue stats (chart + table) ───────────────────────────────────────
+        with Vertical(id='stats-issues'):
+            yield Static('', id='stats-issue-chart', markup=True)
+            yield Static('', id='stats-issue-table', markup=True)
 
     def on_mount(self) -> None:
         self._w_sparkline = self.query_one(_SPARKLINE_ID, Sparkline)
         self._w_hover     = self.query_one(_HOVER_INFO_ID, Static)
-        self._dim = 'now'
         self._update_dim_btns()
         self.query_one(_FILTER_BAR).display = False
         self.query_one('#stats-custom-bar').display = False
         self.query_one(_ISSUES_ID).display = False
-        # Start on dashboard view
-        self.query_one('#stats-dashboard-view').display = True
-        self.query_one('#stats-chart-view').display = False
-        self._load_dashboard()
+        self.query_one(_STACKED_ID).display = False
+        self.query_one(_LEGEND_ID).display = False
+        self._load()
+        self._load_issues()
 
     # ── Button / select handlers ───────────────────────────────────────────────
 
@@ -556,20 +440,9 @@ class StatsWidget(Widget):
     def _set_dim(self, dim: str) -> None:
         self._dim = dim
         self._update_dim_btns()
-        is_now = dim == 'now'
         is_issues = dim == 'issues'
-        # Toggle between dashboard view and chart view
-        try:
-            self.query_one('#stats-dashboard-view').display = is_now
-            self.query_one('#stats-chart-view').display = not is_now
-        except Exception:
-            pass
-        if is_now:
-            self.query_one(_FILTER_BAR).display = False
-            self._load_dashboard()
-            return
-        # show/hide chart vs issues within chart view
-        for wid in ('#stats-chart-area', '#stats-summary', '#stats-breakdown-scroll'):
+        # show/hide the two content areas
+        for wid in ('#stats-chart-area', '#stats-summary', '#stats-breakdown'):
             try:
                 self.query_one(wid).display = not is_issues
             except Exception:
@@ -604,7 +477,7 @@ class StatsWidget(Widget):
             self._load()
 
     def _update_dim_btns(self) -> None:
-        for d in ['now'] + list(_DIMS) + ['issues']:
+        for d in list(_DIMS) + ['issues']:
             try:
                 self.query_one(f'#stats-dim-{d}', Button).set_class(
                     d == self._dim, '--active')
@@ -661,86 +534,8 @@ class StatsWidget(Widget):
     # ── Data load ──────────────────────────────────────────────────────────────
 
     def action_refresh_data(self) -> None:
-        self._load_dashboard()
         self._load()
         self._load_issues()
-
-    # ── Dashboard ──────────────────────────────────────────────────────────────
-
-    def _load_dashboard(self) -> None:
-        """Fetch cluster + job stats in background and render the Now dashboard."""
-        # Check cache
-        if self._dashboard_cache is not None:
-            ts, rendered = self._dashboard_cache
-            if _time.monotonic() - ts < _DASHBOARD_TTL:
-                try:
-                    self.query_one('#stats-dashboard', Static).update(rendered)
-                except Exception:
-                    pass
-                return
-
-        has_sacct = getattr(self.app, '_cmd_sacct', True)
-
-        def _worker():
-            try:
-                from speek.speek_max.slurm import (
-                    fetch_cluster_stats, fetch_job_stats,
-                    fetch_stats_rows_chunked,
-                )
-
-                cluster = fetch_cluster_stats()
-                jobs = fetch_job_stats()
-
-                # Build partition bars + wait estimate
-                part_bars = _build_partition_bars(cluster, jobs)
-                wait_est = _build_wait_estimate(cluster, jobs)
-
-                # Build heatmap if sacct available
-                heatmap_text = Text('')
-                if has_sacct:
-                    hm_cache = self._heatmap_cache
-                    now = _time.monotonic()
-                    if hm_cache is not None and now - hm_cache[0] < _HEATMAP_TTL:
-                        hourly = hm_cache[1]
-                    else:
-                        end_dt = datetime.now()
-                        start_dt = end_dt - timedelta(days=7)
-                        all_rows: list = []
-
-                        def _collect(rows, done, total):
-                            all_rows.clear()
-                            all_rows.extend(rows)
-
-                        try:
-                            fetch_stats_rows_chunked(start_dt, end_dt, _collect)
-                            hourly = _compute_hourly_heatmap(all_rows, cluster)
-                            self._heatmap_cache = (_time.monotonic(), hourly)
-                        except Exception:
-                            hourly = {}
-
-                    if hourly:
-                        heatmap_text = _build_hourly_heatmap(hourly)
-
-                # Combine all sections
-                combined = Text()
-                combined.append_text(part_bars)
-                combined.append_text(wait_est)
-                combined.append_text(heatmap_text)
-
-                self._dashboard_cache = (_time.monotonic(), combined)
-                self.app.call_from_thread(self._render_dashboard, combined)
-            except Exception:
-                pass
-
-        self.run_worker(_worker, thread=True, group='stats-dashboard')
-
-    @safe('Stats dashboard')
-    def _render_dashboard(self, content: Text) -> None:
-        """Update the dashboard Static widget."""
-        try:
-            self.query_one('#stats-dashboard', Static).update(content)
-        except Exception:
-            pass
 
     def _load_issues(self) -> None:
         if not getattr(self.app, '_cmd_sacct', True):
@@ -936,8 +731,23 @@ class StatsWidget(Widget):
         self._ts_labels  = list(ts.get('labels',  []))
 
         # sparkline + y-max label
+        is_user_dim = self._dim == 'user' and per_group
         try:
-            self.query_one(_SPARKLINE_ID, Sparkline).data = ts['buckets']
+            # Toggle sparkline vs stacked chart visibility
+            self.query_one(_SPARKLINE_ID, Sparkline).display = not is_user_dim
+            self.query_one(_STACKED_ID).display = is_user_dim
+            self.query_one(_LEGEND_ID).display = is_user_dim
+
+            if is_user_dim:
+                peak = ts.get('peak', 0)
+                self._last_peak = peak
+                _, n_buckets, _ = _RANGES.get(self._range_key, _RANGES['7d'])
+                chart_text = _render_stacked_chart(per_group, peak, n_buckets)
+                self.query_one(_STACKED_ID, Static).update(chart_text)
+                self.query_one(_LEGEND_ID, Static).update(_build_user_legend(per_group))
+            else:
+                self.query_one(_SPARKLINE_ID, Sparkline).data = ts['buckets']
+
             peak = ts.get('peak', 0)
             self._last_peak = peak
             self.query_one('#stats-y-max', Static).update(
@@ -966,7 +776,7 @@ class StatsWidget(Widget):
         # per-group sparklines in scrollable area
         if per_group:
             try:
-                scroll = self.query_one('#stats-breakdown-scroll', Vertical)
+                scroll = self.query_one('#stats-breakdown-scroll', VerticalScroll)
                 scroll.remove_children()
                 # Sort by total GPU hours descending
                 sorted_groups = sorted(
@@ -974,15 +784,25 @@ class StatsWidget(Widget):
                     key=lambda kv: sum(kv[1].get('buckets', [])),
                     reverse=True,
                 )
+                # Build color map for user dimension
+                user_color_map: Dict[str, str] = {}
+                if self._dim == 'user':
+                    user_color_map = {
+                        u: _USER_COLORS[i % len(_USER_COLORS)]
+                        for i, (u, _) in enumerate(sorted_groups)
+                    }
                 for grp_name, grp_ts in sorted_groups:
                     buckets = grp_ts.get('buckets', [])
                     peak = grp_ts.get('peak', 0)
                     total_h = grp_ts.get('total_gpu_hours', 0)
                     jobs = grp_ts.get('n_jobs', 0)
+                    # Color indicator for user dimension
+                    color = user_color_map.get(grp_name, '')
+                    name_prefix = f'[{color}]●[/{color}] ' if color else ''
                     # Container for each group
                     container = Vertical(classes='stats-group-row')
                     header = Static(
-                        f'[bold]{grp_name}[/bold]  '
+                        f'{name_prefix}[bold]{grp_name}[/bold]  '
                         f'[dim]peak[/dim] [bold]{peak:.0f}[/bold]  '
                         f'[dim]{total_h:.1f} GPU·h[/dim]  '
                         f'[dim]{jobs} jobs[/dim]',
@@ -992,6 +812,9 @@ class StatsWidget(Widget):
                     scroll.mount(container)
                     container.mount(header)
                     container.mount(spark)
+                    # Apply per-user color to sparkline
+                    if color:
+                        spark.styles.color = color
             except Exception:
                 pass
 
