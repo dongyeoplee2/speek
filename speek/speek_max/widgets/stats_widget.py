@@ -738,23 +738,22 @@ class StatsWidget(Widget):
             self.query_one(_STACKED_ID).display = is_user_dim
             self.query_one(_LEGEND_ID).display = is_user_dim
 
+            # Always use the Sparkline widget for the main chart
+            self.query_one(_SPARKLINE_ID, Sparkline).data = ts['buckets']
+            self.query_one(_SPARKLINE_ID, Sparkline).display = True
+            self.query_one(_STACKED_ID).display = False
+
             if is_user_dim:
-                peak = ts.get('peak', 0)
-                self._last_peak = peak
-                _, n_buckets, _ = _RANGES.get(self._range_key, _RANGES['7d'])
-                chart_text = _render_stacked_chart(per_group, peak, n_buckets)
-                # Convert Rich Text to markup string for Static.update
+                # Show user color legend below sparkline
                 from io import StringIO
                 from rich.console import Console as _RCon
-                buf = StringIO()
-                _RCon(file=buf, force_terminal=True, width=200, no_color=False).print(chart_text, end='')
-                self.query_one(_STACKED_ID, Static).update(buf.getvalue())
-                buf2 = StringIO()
                 legend = _build_user_legend(per_group)
-                _RCon(file=buf2, force_terminal=True, width=200, no_color=False).print(legend, end='')
-                self.query_one(_LEGEND_ID, Static).update(buf2.getvalue())
+                buf = StringIO()
+                _RCon(file=buf, force_terminal=True, width=200, no_color=False).print(legend, end='')
+                self.query_one(_LEGEND_ID, Static).update(buf.getvalue())
+                self.query_one(_LEGEND_ID).display = True
             else:
-                self.query_one(_SPARKLINE_ID, Sparkline).data = ts['buckets']
+                self.query_one(_LEGEND_ID).display = False
 
             peak = ts.get('peak', 0)
             self._last_peak = peak
