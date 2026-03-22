@@ -938,6 +938,9 @@ class MyJobsWidget(FoldableTableMixin, Widget):
         else:
             empty.display = False
 
+        # Always post running count so header stays accurate
+        self.post_message(self.RunningCount(n_run, n_pend))
+
         if sig == self._last_myjobs_sig:
             self._last_rows = rows
             self._last_priorities = priorities or {}

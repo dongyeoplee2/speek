@@ -337,8 +337,8 @@ class SpeekMax(App[None]):
         c_error   = tc(tv, 'text-error',   'red')
         label = self.query_one('#app-title-right', Label)
         parts = []
-        running   = getattr(self, '_running',   0)
-        pending   = getattr(self, '_pending',   0)
+        running   = getattr(self, '_my_running',   0)
+        pending   = getattr(self, '_my_pending',   0)
         failed    = getattr(self, '_ev_failed',    0)
         timeout   = getattr(self, '_ev_timeout',   0)
         completed = getattr(self, '_ev_completed', 0)
@@ -373,8 +373,8 @@ class SpeekMax(App[None]):
         self._update_title_right()
 
     def on_my_jobs_widget_running_count(self, event: MyJobsWidget.RunningCount) -> None:
-        self._running = event.running
-        self._pending = event.pending
+        self._my_running = event.running
+        self._my_pending = event.pending
         self._update_title_right()
 
     def on_my_jobs_widget_oom_count(self, event: MyJobsWidget.OomCount) -> None:
