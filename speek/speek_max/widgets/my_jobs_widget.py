@@ -484,20 +484,26 @@ class MyJobsWidget(FoldableTableMixin, Widget):
 
             # Group by submit datetime → individual jobs
             from collections import OrderedDict as _OD
-            by_submit: Dict[str, List[dict]] = _OD()
+            by_submit: Dict[str, Tuple[str, List[dict]]] = _OD()
             for item in items:
                 raw = item.get('submit', '')
-                # Format: strip year, e.g. "2026-03-22T14:30:00" → "03-22 14:30"
+                # Format: strip year, e.g. "2026-03-22T14:30:00" → "03/22 14:30"
                 if raw and raw not in ('N/A', 'Unknown') and len(raw) >= 16:
                     submit_label = raw[5:16].replace('T', ' ').replace('-', '/')
                 elif raw and 'T' in raw:
                     submit_label = raw.split('T')[0]
                 else:
                     submit_label = 'unknown'
-                by_submit.setdefault(submit_label, []).append(item)
+                if submit_label not in by_submit:
+                    by_submit[submit_label] = (raw, [])
+                by_submit[submit_label][1].append(item)
+
+            # Sort by raw timestamp descending (most recent first)
+            sorted_submits = sorted(by_submit.items(),
+                                     key=lambda kv: kv[1][0], reverse=True)
 
             submit_children: List[TreeNode] = []
-            for submit_label, sub_items in by_submit.items():
+            for submit_label, (_raw_ts, sub_items) in sorted_submits:
                 # Sort: running first, then pending
                 sub_items.sort(key=lambda it: (0 if it['state'] == 'RUNNING' else 1))
 

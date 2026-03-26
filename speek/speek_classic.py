@@ -112,6 +112,8 @@ def _parse_gpu_count(tres_per_node):
     """Extract GPU count from TresPerNode field.
     Handles 'gres:gpu:N', 'gres/gpu:N', 'gres:gpu:MODEL:N', and multi-GRES strings.
     Both colon and slash separators between 'gres' and 'gpu' are supported."""
+    if isinstance(tres_per_node, (list, tuple)):
+        tres_per_node = ','.join(str(v) for v in tres_per_node)
     m = re.search(r'gres[:/]gpu(?::[A-Za-z0-9_\-]+)?:(\d+)', tres_per_node or '')
     return int(m.group(1)) if m else 0
 

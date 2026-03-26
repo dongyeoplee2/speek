@@ -5,6 +5,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["speek", "speek.data", "speek.speek_max", "speek.speek_max.widgets"]
 
+[tool.setuptools.package-data]
+"speek.speek_max" = ["*.scss", "*.css"]
+
 [project]
 name = "speek"
 version = "0.0.3"
