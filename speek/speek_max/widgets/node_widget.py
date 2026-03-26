@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -14,8 +14,7 @@ from speek.speek_max.slurm import parse_nodes
 from speek.speek_max._utils import tc
 from speek.speek_max.widgets.datatable import SpeekDataTable
 from speek.speek_max.widgets.foldable_table import (
-    FoldableTableMixin, FoldGroup, FoldMode, Leaf,
-    TreeNode, TableContext, _build_divider_cells, Divider,
+    FoldableTableMixin, FoldGroup, FoldMode, Leaf, TreeNode,
 )
 
 
@@ -38,18 +37,17 @@ class NodeWidget(FoldableTableMixin, Widget):
         yield SpeekDataTable(id='node-dt', cursor_type='row')
 
     def on_mount(self) -> None:
-        self._ctx = self._init_ctx(renderer=self._render_cell, n_cols=7, name_col_width=10)
+        self._ctx = self._init_ctx(renderer=self._render_cell, n_cols=6, name_col_width=20)
         self._last_rows: List[Tuple] = []
         self._tree: List[TreeNode] = []
         dt = self.query_one(SpeekDataTable)
         dt.zebra_stripes = True
-        dt.add_column('Node',      width=10)
-        dt.add_column('Partition', width=6)
-        dt.add_column('GPU',       width=8)
-        dt.add_column('Free',      width=4)
-        dt.add_column('Total',     width=4)
-        dt.add_column('State',     width=7)
-        dt.add_column('Reason',    width=12)
+        dt.add_column('Node',    width=20)
+        dt.add_column('#N',      width=3)
+        dt.add_column('Free',    width=4)
+        dt.add_column('Total',   width=4)
+        dt.add_column('State',   width=7)
+        dt.add_column('Reason',  width=12)
 
     def on_show(self) -> None:
         self._load()
@@ -93,52 +91,58 @@ class NodeWidget(FoldableTableMixin, Widget):
     # ── Tree building ────────────────────────────────────────────────────────
 
     def _build_tree(self, rows: List[Tuple]) -> List[TreeNode]:
-        """Convert node rows into a tree: single-partition nodes as Leaf,
-        multi-partition nodes as FoldGroup with COLLAPSED_SET."""
-        grouped: OrderedDict[str, List[Tuple]] = OrderedDict()
+        """Partition dividers → node leaves (or folds for multi-partition nodes)."""
+        # Group by partition — a node in multiple partitions appears under each
+        by_part: OrderedDict[str, List[Tuple]] = OrderedDict()
         for r in rows:
-            node = r[0]
-            grouped.setdefault(node, []).append(r)
+            parts_str = r[1]  # comma-separated partitions
+            for p in parts_str.split(','):
+                p = p.strip()
+                if p:
+                    by_part.setdefault(p, []).append(r)
+
+        # Sort partitions by total GPUs descending (match queue/clusterbar order)
+        sorted_parts = sorted(by_part.items(),
+                              key=lambda kv: sum(r[4] for r in kv[1]), reverse=True)
 
         # Prune fold state
-        self._ctx.collapsed &= set(grouped.keys())
+        valid_keys = {p for p, _ in sorted_parts}
+        self._ctx.collapsed &= valid_keys
 
         tree: List[TreeNode] = []
-        for node, items in grouped.items():
-            if len(items) == 1:
-                r = items[0]
-                key = f'{r[0]}:{r[1]}'
-                tree.append(Leaf(key=key, data=r, indent=0))
-            else:
-                children = [
-                    Leaf(key=f'{r[0]}:{r[1]}', data=r, indent=3)
-                    for r in items
-                ]
-                # Aggregate info for the divider-style header
-                all_parts = ','.join(r[1] for r in items)
-                agg_model = items[0][2]
-                agg_free = sum(r[3] for r in items)
-                agg_total = sum(r[4] for r in items)
-                state_prio = {'down': 0, 'drain': 1, 'alloc': 2, 'mixed': 3, 'maint': 4, 'idle': 5}
-                agg_state = min((r[5] for r in items), key=lambda s: state_prio.get(s, 99))
-                tree.append(FoldGroup(
-                    key=f'div::{node}',
-                    fold_key=node,
-                    data={
-                        'node': node, 'parts': all_parts, 'model': agg_model,
-                        'free': agg_free, 'total': agg_total, 'state': agg_state,
-                    },
-                    children=children,
-                    mode=FoldMode.COLLAPSED_SET,
-                    indent=0,
-                ))
+        for part, items in sorted_parts:
+            # Sort nodes: free desc, then name
+            items.sort(key=lambda r: (-r[3], r[0]))
+            # Aggregate partition stats
+            agg_free = sum(r[3] for r in items)
+            agg_total = sum(r[4] for r in items)
+            agg_model = items[0][2] if items else '?'
+            models = set(r[2] for r in items)
+            if len(models) > 1:
+                agg_model = ','.join(sorted(models))
+
+            children = [
+                Leaf(key=f'{r[0]}:{part}', data=r, indent=2)
+                for r in items
+            ]
+            tree.append(FoldGroup(
+                key=f'part::{part}',
+                fold_key=part,
+                data={
+                    'part': part, 'model': agg_model,
+                    'free': agg_free, 'total': agg_total,
+                    'n_nodes': len(items),
+                },
+                children=children,
+                mode=FoldMode.COLLAPSED_SET,
+                indent=0,
+            ))
         return tree
 
     def _render_cell(self, node: TreeNode, is_collapsed: bool, n_cols: int) -> List[Text]:
         """Render a single tree node to cells."""
         tv = self.app.theme_variables
         c_muted = tc(tv, 'text-muted', 'bright_black')
-        c_secondary = tc(tv, 'text-secondary', 'default')
         c_success = tc(tv, 'text-success', 'green')
         c_warning = tc(tv, 'text-warning', 'yellow')
         c_error = tc(tv, 'text-error', 'red')
@@ -148,50 +152,56 @@ class NodeWidget(FoldableTableMixin, Widget):
         }
 
         if isinstance(node, FoldGroup):
-            # Multi-partition node divider
+            # Partition divider with usage-proportional colored bar
             d = node.data
-            sc = state_color.get(d['state'], 'default')
-            fc = c_success if d['free'] > 0 else c_error
-            div = Divider(
-                key=node.key, label=d['node'],
-                extra_cells={
-                    1: Text(d['parts'], style=f'dim {c_secondary}'),
-                    2: Text(d['model'], style='dim'),
-                    3: Text(str(d['free']), style=f'bold {fc}'),
-                    4: Text(str(d['total']), style=c_muted),
-                    5: Text(d['state'], style=f'bold {sc}'),
-                    6: Text(' '),
-                },
-            )
-            return _build_divider_cells(self._ctx, div)
+            total = d['total']
+            free = d['free']
+            used = total - free
+            pct = used / total if total else 0.0
+
+            if pct >= 1.0:
+                bar_color = '#CC3333'
+            elif pct >= 0.50:
+                bar_color = tc(tv, 'warning', 'yellow')
+            else:
+                bar_color = tc(tv, 'success', 'green')
+
+            w = self._ctx.name_col_width
+            label = d['part']
+            filled = max(1, int(round(pct * w))) if pct > 0 else 0
+            empty_w = w - filled
+            name_cell = Text()
+            name_cell.append(f'│ {label}'[:filled].ljust(filled),
+                             style=f'bold black on {bar_color}')
+            if empty_w > 0:
+                remaining = f'│ {label}'[filled:]
+                name_cell.append(remaining.ljust(empty_w)[:empty_w],
+                                 style='bold black on white')
+
+            fc = c_success if free > 0 else c_error
+            cells = [Text(' ') for _ in range(n_cols)]
+            cells[0] = name_cell
+            cells[1] = Text(str(d['n_nodes']), style=c_muted)
+            cells[2] = Text(str(free), style=f'bold {fc}')
+            cells[3] = Text(str(total), style=c_muted)
+            cells[4] = Text('')
+            cells[5] = Text('')
+            return cells
 
         if isinstance(node, Leaf):
             r = node.data
-            node_name, parts, model, free, total, state, reason = r
+            node_name, _parts, _model, free, total, state, reason = r
             sc = state_color.get(state, 'default')
             fc = c_success if free > 0 else c_error
-            if node.indent > 0:
-                # Child of multi-partition group
-                return [
-                    Text(f'  {node_name}', style=c_muted),
-                    Text(parts, style=c_secondary),
-                    Text(model),
-                    Text(str(free), style=f'bold {fc}'),
-                    Text(str(total), style=c_muted),
-                    Text(state, style=f'bold {sc}'),
-                    Text(reason, style=c_muted),
-                ]
-            else:
-                # Single-partition node at top level
-                return [
-                    Text(node_name, style='bold'),
-                    Text(parts, style=c_secondary),
-                    Text(model),
-                    Text(str(free), style=f'bold {fc}'),
-                    Text(str(total), style=c_muted),
-                    Text(state, style=f'bold {sc}'),
-                    Text(reason, style=c_muted),
-                ]
+            branch = '└' if node.is_last else '├'
+            return [
+                Text(f' {branch}── {node_name}'),
+                Text(''),
+                Text(str(free), style=f'bold {fc}'),
+                Text(str(total), style=c_muted),
+                Text(state, style=f'bold {sc}'),
+                Text(reason, style=c_muted),
+            ]
 
         return [Text('') for _ in range(n_cols)]
 

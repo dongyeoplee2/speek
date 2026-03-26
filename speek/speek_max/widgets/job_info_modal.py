@@ -372,6 +372,8 @@ class JobInfoModal(SpeekModal):
                     with Vertical(id=_OUTPUT_PANE):
                         yield Static(self._log_path, id='ji-log-path')
                         yield RichLog(id='ji-log', highlight=False, markup=False, wrap=False)
+                        yield Static('', id='ji-stderr-label')
+                        yield RichLog(id='ji-stderr-log', highlight=False, markup=False, wrap=False)
                     with Vertical(id=_GPU_PANE):
                         with Horizontal(id='ji-gpu-toolbar'):
                             yield Button('▶ Fetch  g', id='ji-gpu-fetch-btn')
@@ -408,6 +410,57 @@ class JobInfoModal(SpeekModal):
         else:
             log.write(Text('No log available', style='dim'))
         self.query_one('#ji-detail', Static).update(_build_table(details, tv))
+        # Load stderr if .err file exists
+        self._load_stderr(log_path, details)
+
+    @staticmethod
+    def _derive_stderr_path(log_path: str, details: Dict[str, str]) -> str:
+        """Derive stderr path from StdErr field or by replacing .out/.log → .err."""
+        err_path = details.get('StdErr', '')
+        if err_path:
+            return err_path
+        for suffix in ('.out', '.log'):
+            if log_path.endswith(suffix):
+                return log_path[:-len(suffix)] + '.err'
+        return ''
+
+    @staticmethod
+    def _read_tail(path: str, max_bytes: int = 50_000) -> str:
+        """Read the last *max_bytes* of a file, returning empty string on failure."""
+        import os
+        try:
+            size = os.path.getsize(path)
+            if size == 0:
+                return ''
+            with open(path, 'r', errors='replace') as f:
+                if size > max_bytes:
+                    f.seek(size - max_bytes)
+                    f.readline()  # skip partial line
+                return f.read()
+        except OSError:
+            return ''
+
+    def _load_stderr(self, log_path: str, details: Dict[str, str]) -> None:
+        """Load stderr content if .err file exists alongside .out."""
+        import os
+        stderr_label = self.query_one('#ji-stderr-label', Static)
+        stderr_log = self.query_one('#ji-stderr-log', RichLog)
+        stderr_log.clear()
+
+        err_path = self._derive_stderr_path(log_path, details)
+        content = self._read_tail(err_path) if err_path and os.path.isfile(err_path) else ''
+
+        if content.strip():
+            stderr_label.update(
+                Text(f'── stderr ({err_path}) ──', style='bold red'))
+            stderr_label.display = True
+            err_text = Text(content)
+            _highlight_log(err_text)
+            stderr_log.write(err_text)
+            stderr_log.display = True
+        else:
+            stderr_label.display = False
+            stderr_log.display = False
 
     def _update_title(self) -> None:
         title = _title_from_details(self._job_id, self._details)
