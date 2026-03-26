@@ -64,7 +64,8 @@ def _dim_color(hex_color: str, factor: float = 0.30) -> str:
     return f'#{int(r * factor):02x}{int(g * factor):02x}{int(b * factor):02x}'
 
 
-def _render_stacked_chart(per_group_ts: Dict, peak: float, n_buckets: int) -> Text:
+def _render_stacked_chart(per_group_ts: Dict, peak: float, n_buckets: int,
+                          chart_height: int = 8) -> Text:
     """Render a stacked bar chart as Rich Text with per-user colors.
 
     Users are stacked bottom-to-top in consistent order (highest-total at
@@ -79,7 +80,7 @@ def _render_stacked_chart(per_group_ts: Dict, peak: float, n_buckets: int) -> Te
     users = _sorted_users(per_group_ts)
     user_color = {u: _USER_COLORS[i % len(_USER_COLORS)] for i, u in enumerate(users)}
 
-    height = 8
+    height = max(4, chart_height)
     src_len = max((len(d.get('buckets', [])) for d in per_group_ts.values()), default=n_buckets)
     display_w = n_buckets
 
@@ -797,10 +798,13 @@ class StatsWidget(Widget):
                 peak = ts.get('peak', 0)
                 self._stacked_peak = peak
                 try:
-                    chart_w = sparkline.size.width or 60
+                    stacked_w = self.query_one(_STACKED_ID, Static)
+                    chart_w = stacked_w.size.width or sparkline.size.width or 60
+                    chart_h = max(4, stacked_w.size.height or sparkline.size.height or 8)
                 except Exception:
                     chart_w = 60
-                chart_text = _render_stacked_chart(per_group, peak, chart_w)
+                    chart_h = 8
+                chart_text = _render_stacked_chart(per_group, peak, chart_w, chart_h)
                 stacked = self.query_one(_STACKED_ID, Static)
                 stacked.update(chart_text)
                 stacked.display = True
@@ -947,6 +951,17 @@ class StatsWidget(Widget):
     def on_resize(self) -> None:
         self._update_y_axis()
         self._update_x_axis()
+        # Re-render stacked chart with new dimensions
+        if self._per_group_data and self._stacked_peak > 0:
+            try:
+                stacked = self.query_one(_STACKED_ID, Static)
+                chart_w = stacked.size.width or 60
+                chart_h = max(4, stacked.size.height or 8)
+                chart_text = _render_stacked_chart(
+                    self._per_group_data, self._stacked_peak, chart_w, chart_h)
+                stacked.update(chart_text)
+            except Exception:
+                pass
 
     # ── Sparkline hover ────────────────────────────────────────────────────────
 
