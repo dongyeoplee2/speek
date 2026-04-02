@@ -27,28 +27,48 @@ args = parser.parse_args()
 
 def get_scontrol_dict(unit):
     assert unit in ['Job', 'Partition', 'Node']
-    
-    scontrol_str = subprocess.check_output(['scontrol', 'show', unit]).decode('utf-8').replace(' ', '\n')
-    
-    scontrols =  {}
-    delimiter = f'{unit}Name=' if unit != 'Job' else 'JobId='
-    for scontrol in scontrol_str.split(delimiter):
-        if not scontrol: continue
-        n, *infos = [i for i in scontrol.split('\n') if i]
-        if unit == 'Job': n = int(n) if n!='No' else 0
-        
-        scontrols[n] = {}
-        for info in infos:
-            if '=' not in info:
-                scontrols[n][info] = None
+
+    scontrol_str = subprocess.check_output(
+        ['scontrol', 'show', unit, '--oneliner'],
+        text=True, stderr=subprocess.DEVNULL,
+    )
+
+    scontrols = {}
+    for line in scontrol_str.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # Each line is one record; split on spaces to get key=value tokens
+        tokens = line.split()
+        record = {}
+        for token in tokens:
+            if '=' not in token:
                 continue
-            k, v = info.split('=', 1)
+            k, v = token.split('=', 1)
             if ',' not in v or '[' in v:
-                scontrols[n][k] = v
+                record[k] = v
             elif '=' in v:
-                scontrols[n][k] = dict([i.split('=') for i in v.split(',')])
+                try:
+                    record[k] = dict([i.split('=', 1) for i in v.split(',')])
+                except ValueError:
+                    record[k] = v
             else:
-                scontrols[n][k] = tuple(v.split(','))
+                record[k] = tuple(v.split(','))
+
+        # Extract the record key
+        if unit == 'Job':
+            n = record.pop('JobId', None)
+            if n is None:
+                continue
+            try:
+                n = int(n)
+            except ValueError:
+                continue
+        else:
+            n = record.pop(f'{unit}Name', None)
+            if n is None:
+                continue
+        scontrols[n] = record
     return scontrols
 
 def td_parse(s):
@@ -118,6 +138,48 @@ def _parse_gpu_count(tres_per_node):
     return int(m.group(1)) if m else 0
 
 
+def _node_gpu_usage():
+    """Query scontrol show node for actual per-partition GPU total/used.
+    Returns {partition: (total, used)}."""
+    try:
+        out = subprocess.check_output(
+            ['scontrol', 'show', 'node', '--oneliner'],
+            text=True, stderr=subprocess.DEVNULL)
+    except Exception:
+        return {}
+    result: Dict[str, Tuple[int, int]] = {}
+    for ln in out.splitlines():
+        if not ln.strip():
+            continue
+        def _f(key):
+            m = re.search(rf'{key}=(\S+)', ln)
+            return m.group(1) if m else ''
+        parts_str = _f('Partitions')
+        cfg = _f('CfgTRES')
+        alloc = _f('AllocTRES')
+        gres_used = _f('GresUsed')
+        # Total
+        mg = re.search(r'gres/gpu=(\d+)', cfg)
+        total = int(mg.group(1)) if mg else 0
+        if total == 0:
+            continue
+        # Used
+        mu = re.search(r'gres/gpu=(\d+)', alloc)
+        if mu:
+            used = int(mu.group(1))
+        else:
+            gu = re.search(r'gpu(?::[A-Za-z0-9_\-]+)?:(\d+)', gres_used or '', re.IGNORECASE)
+            used = int(gu.group(1)) if gu else 0
+        used = min(used, total)
+        for p in parts_str.split(','):
+            p = p.strip()
+            if not p:
+                continue
+            prev = result.get(p, (0, 0))
+            result[p] = (prev[0] + total, prev[1] + used)
+    return result
+
+
 def compute_gpu_stats(partitions, jobs, tw):
     """
     Core computation: given parsed scontrol dicts and a release time-window,
@@ -138,6 +200,9 @@ def compute_gpu_stats(partitions, jobs, tw):
 
     user_status, gpu_resource = {}, NewState(resource)
     user_job_status = {}
+
+    # Get actual node-level GPU usage (authoritative source)
+    node_usage = _node_gpu_usage()
 
     if jobs:
         for id, job in jobs.items():
@@ -175,24 +240,21 @@ def compute_gpu_stats(partitions, jobs, tw):
 
                 # gpu status
                 gpu_resource[gpu] = gpu_resource.get(gpu, NewState(resource))
-                
+
                 if j_status=='RUNNING':
-                    gpu_resource['Available'] -= gpu_count
-                    gpu_resource[gpu]['Available'] -= gpu_count
-                
                     time_left = {'td': td_parse(job['TimeLimit'])- td_parse(job['RunTime']),
                                 'count': gpu_count, 'user': user}
-                    
+
                     up_re = gpu_resource[gpu].get('Upcomming release', [time_left, [time_left]])
                     up_re[0] = min(time_left, up_re[0], key=lambda x: x['td'])
-                    
+
                     up_re[1].append(time_left)
                     up_re[1] = [t for t in up_re[1] if t['td']-up_re[0]['td']<tw]
-                    
+
                     up_re[0]['total_count'] = sum([t['count'] for t in up_re[1]])
                     td = up_re[0]['td']
                     up_re[0]['str'] = (f'{td.days}-' if td.days else '') + f"{str(td).split(', ')[-1][:-3]} ({up_re[0]['total_count']})"
-                    
+
                     gpu_resource[gpu]['Upcomming release'] = up_re
 
 
@@ -201,13 +263,23 @@ def compute_gpu_stats(partitions, jobs, tw):
         tres = info.get('TRES')
         count = int(tres.get('gres/gpu', 0)) if isinstance(tres, dict) else 0
         if count == 0: continue
-        
+
         gpu_resource[gpu] = gpu_resource.get(gpu, NewState(resource))
-        
-        for s in ['Available', 'Total']:
-            gpu_resource[s] += count
-            gpu_resource[gpu][s] += count
-        
+
+        # Total from partition TRES (authoritative for partition-level total)
+        # Used from node state (authoritative for actual allocation)
+        nu = node_usage.get(gpu, None)
+        if nu:
+            _nu_total, used = nu
+            avail = max(count - used, 0)
+        else:
+            avail = count  # fallback: assume all free
+
+        gpu_resource['Total'] += count
+        gpu_resource[gpu]['Total'] += count
+        gpu_resource['Available'] += avail
+        gpu_resource[gpu]['Available'] += avail
+
         gpu_resource['Usage'] = f"{(gpu_resource['Total'] - gpu_resource['Available'])/gpu_resource['Total']*100:.2f}%"
         gpu_resource[gpu]['Usage'] = f"{(gpu_resource[gpu]['Total'] - gpu_resource[gpu]['Available'])/gpu_resource[gpu]['Total']*100:.2f}%"
         
@@ -263,29 +335,56 @@ def get_slurm_resource():
     tables = []
 
     ranking = {0:'🥇', 1:'🥈', 2:'🥉'}
-    get_state = lambda p: ('☠️ ' if p==100 else '🔥' if p>90 else '🏖️ ' if p==0 else '❄️ ' if p<10 else '') #+' '
     pareto = '🚩'
     king = {'RUNNING':'', 'PENDING':''}
 
-    table1 = Table(show_header=True, show_edge=False, box=None,
-                   pad_edge=False, padding=(0, 1, 0, 0))
+    def _util_color(pct):
+        """Utilization color: green < 50%, yellow 50-99%, red 100%."""
+        if pct >= 100: return 'red'
+        if pct >= 50:  return 'yellow'
+        return 'green'
+
+    from rich.box import MINIMAL
+    table1 = Table(show_header=True, show_edge=False, box=MINIMAL,
+                   pad_edge=False, padding=(0, 1, 0, 0), border_style='#777777')
 
     # add columns
     partitions_list = [p for p in sorted({*partitions.keys()} - resource) if _gpu_weight(partitions, p, gres) > 0.0]
     partitions_list = sorted(partitions_list, key=lambda x: gpu_resource[x]['Total'] * _gpu_weight(partitions, x, gres), reverse=True)
     table1.add_column("User", style='bold', no_wrap=True)
+    def _state_emoji(pct):
+        if pct == 100: return '☠️ '
+        if pct > 90:   return '🔥'
+        if pct == 0:   return '🏖️ '
+        if pct < 10:   return '❄️ '
+        return ''
+
     for i, p in enumerate(partitions_list):
-        table1.add_column(get_state(float(gpu_resource[p]['Usage'][:-1])) + p, justify="right", no_wrap=True)
+        pct = float(gpu_resource[p]['Usage'][:-1])
+        uc = _util_color(pct)
+        table1.add_column(RText(_state_emoji(pct) + p, style=f'bold {uc}'), justify="right", no_wrap=True)
     table1.add_column("Total", justify="right", style='bold', no_wrap=True)
 
+    # add rows — GPU counts colored by utilization
+    def _gpu_cell(avail, total):
+        t = RText()
+        pct = (total - avail) / total * 100 if total else 0
+        uc = _util_color(pct)
+        t.append(str(avail), style=f'bold {uc}')
+        t.append(f'/{total}', style='bright_black')
+        return t
 
-    # add rows
+    def _usage_cell(usage_str):
+        pct = float(usage_str[:-1])
+        uc = _util_color(pct)
+        return RText(usage_str, style=f'bold {uc}')
+
     table1.add_row(RText('GPUs', style='dim', justify='right'),
-                   *[f'{gpu_resource[p]["Available"]}/{gpu_resource[p]["Total"]}' for p in partitions_list],
-                   f'{gpu_resource["Available"]}/{gpu_resource["Total"]}')
+                   *[_gpu_cell(gpu_resource[p]['Available'], gpu_resource[p]['Total']) for p in partitions_list],
+                   _gpu_cell(gpu_resource['Available'], gpu_resource['Total']))
     table1.add_row(RText('Usage', style='dim', justify='right'),
-                   *[str(gpu_resource[p]['Usage']) for p in partitions_list],
-                   str(gpu_resource['Usage']), end_section=True)
+                   *[_usage_cell(gpu_resource[p]['Usage']) for p in partitions_list],
+                   _usage_cell(gpu_resource['Usage']), end_section=True)
 
     user_status_sorted = sorted(user_status.items(), key=lambda x: (x[1]['RUNNING'], x[1]['PENDING']), reverse=True)
     agg_running = 0
@@ -302,9 +401,26 @@ def get_slurm_resource():
         rank = ranking.get(i, i+1 if agg_running<all_running*0.8 else pareto)
         
         user_true = user_lookup.get(user, user)
-        state_str = lambda state: (f"▶{v}" if (v:=state['RUNNING']) else '') + (f" ⏸{v}" if (v:=state['PENDING']) else '').strip()
+        def _state_text(state):
+            t = RText()
+            r = state['RUNNING']
+            p = state['PENDING']
+            if r: t.append(f'▶{r}', style='bold green')
+            if r and p: t.append(' ')
+            if p: t.append(f'⏸{p}', style='bold yellow')
+            return t
         king_str = lambda p: ''.join([king[s] for s in sorted(status) if user==gpu_resource[p][f'max_{s}_user']])
-        table1.add_row(f'{rank:>2}. {user_true}', *[king_str(p)+state_str(info.get(p, NewState(status))) for p in partitions_list], state_str(info), style=style, end_section=me_section)
+        cells = []
+        for p in partitions_list:
+            st = _state_text(info.get(p, NewState(status)))
+            ks = king_str(p)
+            if ks:
+                t = RText(ks)
+                t.append_text(st)
+                cells.append(t)
+            else:
+                cells.append(st)
+        table1.add_row(f'{rank:>2}. {user_true}', *cells, _state_text(info), style=style, end_section=me_section)
     
     tables.append(Align.center(Panel(
         table1,
@@ -324,8 +440,8 @@ def get_slurm_resource():
     jobs = user_job_status.get(me, {})
 
     if jobs:
-        table2 = Table(show_header=True, show_edge=False, box=None,
-                       pad_edge=False, padding=(0, 1, 0, 0))
+        table2 = Table(show_header=True, show_edge=False, box=MINIMAL,
+                       pad_edge=False, padding=(0, 1, 0, 0), border_style='#777777')
 
         table2.add_column('St', style='bold', no_wrap=True)
         table2.add_column('Job', no_wrap=True)

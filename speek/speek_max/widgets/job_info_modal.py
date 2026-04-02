@@ -20,6 +20,7 @@ _GPU_RE        = re.compile(r'gres/gpu(?::([a-z0-9_-]+))?[=:](\d+)', re.IGNORECA
 _JI_LOG        = '#ji-log'
 _DETAIL_PANE   = 'ji-detail-pane'
 _OUTPUT_PANE   = 'ji-output-pane'
+_STDERR_PANE   = 'ji-stderr-pane'
 _GPU_PANE      = 'ji-gpu-pane'
 _PRIORITY_PANE = 'ji-priority-pane'  # kept for compat
 _ANALYSIS_PANE = 'ji-priority-pane'  # same pane, renamed conceptually
@@ -208,7 +209,8 @@ class JobInfoModal(SpeekModal):
         Binding('tab',      'switch_tab',     '⇥ Tab',    show=True),
         Binding('1',        'show_detail',    'Detail',   show=True),
         Binding('2',        'show_output',    'Output',   show=True),
-        Binding('3',        'show_gpu',       'GPU',      show=True),
+        Binding('3',        'show_stderr',    'Stderr',   show=True),
+        Binding('4',        'show_gpu',       'GPU',      show=True),
         Binding('g',        'fetch_gpu',      '⚡ Fetch',  show=True),
         Binding('r',        'refresh',        'Refresh',  show=True),
         Binding('l,right',  'next_job',       '→ Next',   show=True),
@@ -372,7 +374,8 @@ class JobInfoModal(SpeekModal):
                     with Vertical(id=_OUTPUT_PANE):
                         yield Static(self._log_path, id='ji-log-path')
                         yield RichLog(id='ji-log', highlight=False, markup=False, wrap=False)
-                        yield Static('', id='ji-stderr-label')
+                    with Vertical(id=_STDERR_PANE):
+                        yield Static('', id='ji-stderr-path')
                         yield RichLog(id='ji-stderr-log', highlight=False, markup=False, wrap=False)
                     with Vertical(id=_GPU_PANE):
                         with Horizontal(id='ji-gpu-toolbar'):
@@ -384,7 +387,8 @@ class JobInfoModal(SpeekModal):
                 with Vertical(id='ji-tab-sidebar'):
                     yield Static('1\nDetail',   id='ji-tab-btn-detail',   classes='ji-tab-btn')
                     yield Static('2\nOutput',   id='ji-tab-btn-output',   classes='ji-tab-btn')
-                    yield Static('3\nGPU',      id='ji-tab-btn-gpu',      classes='ji-tab-btn')
+                    yield Static('3\nStderr',   id='ji-tab-btn-stderr',   classes='ji-tab-btn')
+                    yield Static('4\nGPU',      id='ji-tab-btn-gpu',      classes='ji-tab-btn')
             yield Static('', id='ji-hint', markup=True)
 
     def on_mount(self) -> None:
@@ -441,9 +445,9 @@ class JobInfoModal(SpeekModal):
             return ''
 
     def _load_stderr(self, log_path: str, details: Dict[str, str]) -> None:
-        """Load stderr content if .err file exists alongside .out."""
+        """Load stderr content into the stderr tab."""
         import os
-        stderr_label = self.query_one('#ji-stderr-label', Static)
+        stderr_path_w = self.query_one('#ji-stderr-path', Static)
         stderr_log = self.query_one('#ji-stderr-log', RichLog)
         stderr_log.clear()
 
@@ -451,16 +455,13 @@ class JobInfoModal(SpeekModal):
         content = self._read_tail(err_path) if err_path and os.path.isfile(err_path) else ''
 
         if content.strip():
-            stderr_label.update(
-                Text(f'── stderr ({err_path}) ──', style='bold red'))
-            stderr_label.display = True
+            stderr_path_w.update(err_path)
             err_text = Text(content)
             _highlight_log(err_text)
             stderr_log.write(err_text)
-            stderr_log.display = True
         else:
-            stderr_label.display = False
-            stderr_log.display = False
+            stderr_path_w.update('[dim]No stderr file found[/dim]')
+            stderr_log.write(Text('No stderr output', style='dim'))
 
     def _update_title(self) -> None:
         title = _title_from_details(self._job_id, self._details)
@@ -472,13 +473,13 @@ class JobInfoModal(SpeekModal):
     def _update_hint(self) -> None:
         n   = len(self._job_ids)
         nav = '[bold]h/l[/] job  ' if n > 1 else ''
-        hint = (f'{nav}[bold]j/k[/] scroll  [bold]1/2/3[/] pane  '
+        hint = (f'{nav}[bold]j/k[/] scroll  [bold]1/2/3/4[/] pane  '
                 '[bold]g[/] fetch GPU  [bold]r[/] refresh  [bold]⇥[/] switch  [bold]q[/] close')
         self.query_one('#ji-hint', Static).update(hint)
 
     # ── Tab helpers ────────────────────────────────────────────────────────────
 
-    _PANE_CYCLE = (_DETAIL_PANE, _OUTPUT_PANE, _GPU_PANE)
+    _PANE_CYCLE = (_DETAIL_PANE, _OUTPUT_PANE, _STDERR_PANE, _GPU_PANE)
 
     def _set_active_tab(self, pane_id: str) -> None:
         # Map old pane id to detail if someone passes priority
@@ -487,6 +488,7 @@ class JobInfoModal(SpeekModal):
         self.query_one('#ji-switcher', ContentSwitcher).current = pane_id
         self.query_one('#ji-tab-btn-detail').set_class(pane_id == _DETAIL_PANE,   '--active')
         self.query_one('#ji-tab-btn-output').set_class(pane_id == _OUTPUT_PANE,   '--active')
+        self.query_one('#ji-tab-btn-stderr').set_class(pane_id == _STDERR_PANE,   '--active')
         self.query_one('#ji-tab-btn-gpu').set_class(pane_id == _GPU_PANE,         '--active')
 
     def _active_pane(self) -> str:
@@ -502,6 +504,9 @@ class JobInfoModal(SpeekModal):
 
     def action_show_output(self) -> None:
         self._set_active_tab(_OUTPUT_PANE)
+
+    def action_show_stderr(self) -> None:
+        self._set_active_tab(_STDERR_PANE)
 
     def action_show_gpu(self) -> None:
         self._set_active_tab(_GPU_PANE)
