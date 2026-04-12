@@ -135,9 +135,10 @@ def _compute_trends(stats: Dict[str, Dict]) -> Dict[str, Tuple[str, int]]:
     return trends
 
 
-def _bar(used: int, total: int, width: int = 16) -> Text:
+def _bar(used: int, total: int, width: int = 16, down: int = 0) -> Text:
     pct = used / total if total else 0.0
-    if pct == 0:
+    down_pct = down / total if total else 0.0
+    if pct == 0 and down == 0:
         t = Text()
         t.append('|', style='bright_black')
         t.append(' 0% ', style='bold green')
@@ -147,10 +148,15 @@ def _bar(used: int, total: int, width: int = 16) -> Text:
     fg = 'black' if pct < 0.90 else 'white'
     pct_str = f'{round(pct * 100)}%'
     fw = max(int(round(pct * width)), len(pct_str))
-    aw = width - fw
+    dw = int(round(down_pct * width))  # down portion width
+    aw = max(0, width - fw - dw)       # free portion width
     t = Text()
     t.append(f'|{pct_str:<{fw}}', style=f'bold {fg} on {color}')
-    t.append(' ' * aw + '|', style='bright_black')
+    if aw > 0:
+        t.append(' ' * aw, style='bright_black')
+    if dw > 0:
+        t.append('░' * dw, style='#333333')
+    t.append('|', style='bright_black')
     return t
 
 
@@ -221,6 +227,7 @@ def _fetch_cluster() -> Dict[str, Dict]:
     agg: Dict[str, Dict] = defaultdict(lambda: {
         'Total': 0, 'Used': 0, 'Nodes': [],
         '_cpu': 0, '_mem': 0,
+        '_down_gpus': 0, '_down_nodes': 0,
     })
     seen: Dict[str, set] = defaultdict(set)
 
@@ -270,7 +277,12 @@ def _fetch_cluster() -> Dict[str, Dict]:
             mem = 0
 
         agg[model]['Total'] += total
-        agg[model]['Used'] += used
+        if state in ('DOWN', 'DRAIN', 'DRAINING', 'DRAINED'):
+            agg[model]['Used'] += total  # down nodes: all GPUs unavailable
+            agg[model]['_down_gpus'] += total
+            agg[model]['_down_nodes'] += 1
+        else:
+            agg[model]['Used'] += used
         agg[model]['_cpu'] += cpu
         agg[model]['_mem'] += mem
         if node not in seen[model]:
@@ -292,6 +304,8 @@ def _fetch_cluster() -> Dict[str, Dict]:
             'CPUperGPU': d['_cpu'] // n_gpus if d['_cpu'] else None,
             'RAMperGPU': d['_mem'] // n_gpus // 1024 if d['_mem'] else None,
             'Nodes': sorted(d['Nodes'], key=lambda x: x[0]),
+            'DownGPUs': d['_down_gpus'],
+            'DownNodes': d['_down_nodes'],
         }
     return result
 
@@ -507,18 +521,47 @@ def build_panel(stats: Dict[str, Dict], my_gpus: Dict,
                 my_t.append(' ')
             my_t.append(f'⏸{my_pd}', style='bold yellow')
 
-        row = [
-            Text(m, style=f'bold {uc}'),
-            Text(f'{vram}G', style='bright_black') if vram else Text(''),
-            Text(emoji),
-            _bar(U, T, 14),
-            cnt_t,
-            dem_t,
-        ]
+        down_gpus = d.get('DownGPUs', 0)
+        all_down = down_gpus >= T and T > 0
+
+        if all_down:
+            _ds = 'dim '
+            dead_bar = Text()
+            dead_bar.append(f'|{"DEAD":^{14}}|', style='dim on black')
+            row = [
+                Text(m, style='dim '),
+                Text(f'{vram}G', style=_ds) if vram else Text('', style=_ds),
+                Text('', style=_ds),
+                dead_bar,
+                Text(f'{F}/{T}', style=_ds),
+                Text('', style=_ds),
+            ]
+        elif down_gpus > 0:
+            # Some nodes down: show down count after demand
+            down_t = Text()
+            down_t.append(f'↓{down_gpus}', style='bold red')
+            row = [
+                Text(m, style=f'bold {uc}'),
+                Text(f'{vram}G', style='bright_black') if vram else Text(''),
+                Text(emoji),
+                _bar(U - down_gpus, T, 14, down=down_gpus),
+                cnt_t,
+                dem_t if dem_t.plain else down_t,
+            ]
+        else:
+            row = [
+                Text(m, style=f'bold {uc}'),
+                Text(f'{vram}G', style='bright_black') if vram else Text(''),
+                Text(emoji),
+                _bar(U, T, 14, down=0),
+                cnt_t,
+                dem_t,
+            ]
+        _bg = ''
         if has_any_trend:
-            row.append(trend_t)
-        row.append(Text('│', style='bright_black'))
-        row.append(my_t)
+            row.append(trend_t if not all_down else Text('', style=f'dim {_bg}'))
+        row.append(Text('│', style=f'dim {_bg}') if all_down else Text('│', style='bright_black'))
+        row.append(Text('', style=f'dim {_bg}') if all_down else my_t)
         table.add_row(*row)
 
     # Total row (separated by line above via end_section)

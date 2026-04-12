@@ -127,22 +127,28 @@ def build_cluster_renderable(
         if pct >= 0.50: return _c_yellow
         return _c_green
 
-    def _bar(used: int, total: int, width: int = 16) -> Text:
+    def _bar(used: int, total: int, width: int = 16, down: int = 0) -> Text:
         pct = used / total if total else 0.0
-        if pct == 0:
+        down_pct = down / total if total else 0.0
+        if pct == 0 and down == 0:
             t = Text()
             t.append('|', style=text_muted)
             t.append(' 0% ', style=f'bold {_c_green}')
             t.append(' ' * (width - 4) + '|', style=text_muted)
             return t
         color = _util_color(pct)
-        fg = 'black'
+        fg = 'black' if pct < 0.90 else 'white'
         pct_str = f'{round(pct * 100)}%'
         fw = max(int(round(pct * width)), len(pct_str))
-        aw = width - fw
+        dw = int(round(down_pct * width))
+        aw = max(0, width - fw - dw)
         t = Text()
         t.append(f'|{pct_str:<{fw}}', style=f'bold {fg} on {color}')
-        t.append(' ' * aw + '|',      style=text_muted)
+        if aw > 0:
+            t.append(' ' * aw, style=text_muted)
+        if dw > 0:
+            t.append('░' * dw, style='#333333')
+        t.append('|', style=text_muted)
         return t
 
     models = sorted(stats, key=lambda m: stats[m]['Total'], reverse=True)
@@ -159,7 +165,7 @@ def build_cluster_renderable(
     table.add_column('n_count', no_wrap=True)
     table.add_column('nodes',   no_wrap=True, min_width=8, max_width=30)
 
-    total_T = total_U = 0
+    total_T = total_U = total_down = 0
     for m in models:
         d = stats[m]
         T, U, F = d['Total'], d['Used'], d['Free']
@@ -167,13 +173,20 @@ def build_cluster_renderable(
         pct_100 = pct * 100
         total_T += T
         total_U += U
+        down_gpus = d.get('DownGPUs', 0)
+        total_down += down_gpus
         uc = _util_color(pct)
         emoji = _usage_emoji(pct_100)
 
         vram = d.get('VRAM')
+        all_down = down_gpus >= T and T > 0
 
-        model_cell = Text(m, style=f'bold {uc}')
-        vram_cell = Text(f'{vram}G', style=text_muted) if vram else Text('')
+        if all_down:
+            model_cell = Text(m, style='bright_black')
+            vram_cell = Text(f'{vram}G', style='bright_black') if vram else Text('')
+        else:
+            model_cell = Text(m, style=f'bold {uc}')
+            vram_cell = Text(f'{vram}G', style=text_muted) if vram else Text('')
 
         nodes = d.get('Nodes', [])
         n_count = len(nodes)
@@ -185,7 +198,11 @@ def build_cluster_renderable(
 
         pending_jobs = by_model.get(m, {}).get('PD', 0)
         demand_cell = Text()
-        if pending_jobs:
+        if all_down:
+            demand_cell.append(f' ↓{down_gpus}', style='bold red')
+        elif down_gpus > 0:
+            demand_cell.append(f' ↓{down_gpus}', style='bold red')
+        elif pending_jobs:
             pressure = pending_jobs / max(F, 1)
             if pressure >= 2:
                 dc = _c_red
@@ -197,16 +214,30 @@ def build_cluster_renderable(
         else:
             demand_cell.append('     ', style=text_muted)
 
-        table.add_row(
-            model_cell,
-            vram_cell,
-            Text(f'{emoji} '),
-            _bar(U, T),
-            counts_cell,
-            demand_cell,
-            Text(f' {n_count}× ', style=text_muted),
-            _node_range_text(nodes, tv),
-        )
+        if all_down:
+            _ds = 'bright_black'
+            width = 16  # match _bar() default width
+            dead_bar = Text(f'|{"DEAD":^{width}}|', style='bright_black on black')
+            dead_cnt = Text()
+            dead_cnt.append(f' {F}', style=_ds)
+            dead_cnt.append('/', style=_ds)
+            dead_cnt.append(str(T), style=_ds)
+            table.add_row(
+                model_cell, vram_cell, Text('', style=_ds),
+                dead_bar, dead_cnt,
+                Text('', style=_ds),
+                Text(f' {n_count}× ', style=_ds),
+                _node_range_text(nodes, tv),
+            )
+        else:
+            table.add_row(
+                model_cell, vram_cell,
+                Text(f'{emoji} '),
+                _bar(U - down_gpus, T, down=down_gpus),
+                counts_cell, demand_cell,
+                Text(f' {n_count}× ', style=text_muted),
+                _node_range_text(nodes, tv),
+            )
 
     total_pct = total_U / total_T if total_T else 0.0
     uc = _util_color(total_pct)
@@ -230,7 +261,7 @@ def build_cluster_renderable(
         Text('Total', style=f'bold {uc}'),
         Text(''),
         Text(f'{_usage_emoji(total_pct * 100)} '),
-        _bar(total_U, total_T),
+        _bar(total_U - total_down, total_T, down=total_down),
         total_counts,
         total_demand,
         Text(''),

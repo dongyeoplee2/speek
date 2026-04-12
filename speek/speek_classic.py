@@ -139,15 +139,15 @@ def _parse_gpu_count(tres_per_node):
 
 
 def _node_gpu_usage():
-    """Query scontrol show node for actual per-partition GPU total/used.
-    Returns {partition: (total, used)}."""
+    """Query scontrol show node for actual per-partition GPU total/used/down.
+    Returns {partition: (total, used, down_gpus)}."""
     try:
         out = subprocess.check_output(
             ['scontrol', 'show', 'node', '--oneliner'],
             text=True, stderr=subprocess.DEVNULL)
     except Exception:
         return {}
-    result: Dict[str, Tuple[int, int]] = {}
+    result = {}
     for ln in out.splitlines():
         if not ln.strip():
             continue
@@ -158,25 +158,28 @@ def _node_gpu_usage():
         cfg = _f('CfgTRES')
         alloc = _f('AllocTRES')
         gres_used = _f('GresUsed')
-        # Total
+        state = _f('State').split('+')[0].rstrip('*~#$').upper()
         mg = re.search(r'gres/gpu=(\d+)', cfg)
         total = int(mg.group(1)) if mg else 0
         if total == 0:
             continue
-        # Used
-        mu = re.search(r'gres/gpu=(\d+)', alloc)
-        if mu:
-            used = int(mu.group(1))
+        is_down = state in ('DOWN', 'DRAIN', 'DRAINING', 'DRAINED')
+        if is_down:
+            used = total
         else:
-            gu = re.search(r'gpu(?::[A-Za-z0-9_\-]+)?:(\d+)', gres_used or '', re.IGNORECASE)
-            used = int(gu.group(1)) if gu else 0
-        used = min(used, total)
+            mu = re.search(r'gres/gpu=(\d+)', alloc)
+            if mu:
+                used = int(mu.group(1))
+            else:
+                gu = re.search(r'gpu(?::[A-Za-z0-9_\-]+)?:(\d+)', gres_used or '', re.IGNORECASE)
+                used = int(gu.group(1)) if gu else 0
+            used = min(used, total)
         for p in parts_str.split(','):
             p = p.strip()
             if not p:
                 continue
-            prev = result.get(p, (0, 0))
-            result[p] = (prev[0] + total, prev[1] + used)
+            prev = result.get(p, (0, 0, 0))
+            result[p] = (prev[0] + total, prev[1] + used, prev[2] + (total if is_down else 0))
     return result
 
 
@@ -270,10 +273,12 @@ def compute_gpu_stats(partitions, jobs, tw):
         # Used from node state (authoritative for actual allocation)
         nu = node_usage.get(gpu, None)
         if nu:
-            _nu_total, used = nu
+            _nu_total, used, down = nu
             avail = max(count - used, 0)
         else:
-            avail = count  # fallback: assume all free
+            avail = count
+            down = 0
+        gpu_resource[gpu]['DownGPUs'] = down
 
         gpu_resource['Total'] += count
         gpu_resource[gpu]['Total'] += count
@@ -359,14 +364,27 @@ def get_slurm_resource():
         if pct < 10:   return '❄️ '
         return ''
 
+    _dead_parts = set()
     for i, p in enumerate(partitions_list):
         pct = float(gpu_resource[p]['Usage'][:-1])
-        uc = _util_color(pct)
-        table1.add_column(RText(_state_emoji(pct) + p, style=f'bold {uc}'), justify="right", no_wrap=True)
+        down = gpu_resource[p].get('DownGPUs', 0)
+        total_p = gpu_resource[p].get('Total', 0)
+        all_down = down >= total_p and total_p > 0
+        if all_down:
+            _dead_parts.add(p)
+            table1.add_column(RText(p, style='bright_black'), justify="right", no_wrap=True)
+        else:
+            uc = _util_color(pct)
+            table1.add_column(RText(_state_emoji(pct) + p, style=f'bold {uc}'), justify="right", no_wrap=True)
     table1.add_column("Total", justify="right", style='bold', no_wrap=True)
 
     # add rows — GPU counts colored by utilization
-    def _gpu_cell(avail, total):
+    def _gpu_cell(avail, total, partition=''):
+        if partition in _dead_parts:
+            t = RText()
+            t.append('DEAD', style='bright_black')
+            t.append(f'/{total}', style='bright_black')
+            return t
         t = RText()
         pct = (total - avail) / total * 100 if total else 0
         uc = _util_color(pct)
@@ -374,16 +392,18 @@ def get_slurm_resource():
         t.append(f'/{total}', style='bright_black')
         return t
 
-    def _usage_cell(usage_str):
+    def _usage_cell(usage_str, partition=''):
+        if partition in _dead_parts:
+            return RText(usage_str, style='bright_black')
         pct = float(usage_str[:-1])
         uc = _util_color(pct)
         return RText(usage_str, style=f'bold {uc}')
 
     table1.add_row(RText('GPUs', style='dim', justify='right'),
-                   *[_gpu_cell(gpu_resource[p]['Available'], gpu_resource[p]['Total']) for p in partitions_list],
+                   *[_gpu_cell(gpu_resource[p]['Available'], gpu_resource[p]['Total'], p) for p in partitions_list],
                    _gpu_cell(gpu_resource['Available'], gpu_resource['Total']))
     table1.add_row(RText('Usage', style='dim', justify='right'),
-                   *[_usage_cell(gpu_resource[p]['Usage']) for p in partitions_list],
+                   *[_usage_cell(gpu_resource[p]['Usage'], p) for p in partitions_list],
                    _usage_cell(gpu_resource['Usage']), end_section=True)
 
     user_status_sorted = sorted(user_status.items(), key=lambda x: (x[1]['RUNNING'], x[1]['PENDING']), reverse=True)
@@ -412,6 +432,9 @@ def get_slurm_resource():
         king_str = lambda p: ''.join([king[s] for s in sorted(status) if user==gpu_resource[p][f'max_{s}_user']])
         cells = []
         for p in partitions_list:
+            if p in _dead_parts:
+                cells.append(RText('—', style='bright_black'))
+                continue
             st = _state_text(info.get(p, NewState(status)))
             ks = king_str(p)
             if ks:

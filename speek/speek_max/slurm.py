@@ -148,6 +148,7 @@ def fetch_cluster_stats() -> Dict[str, Dict]:
     agg: Dict[str, Dict] = defaultdict(lambda: {
         'Total': 0, 'Used': 0, 'Nodes': [],
         '_cpu_total': 0, '_mem_total': 0, '_node_count': 0,
+        '_down_gpus': 0, '_down_nodes': 0,
     })
 
     for ln in out.splitlines():
@@ -205,7 +206,13 @@ def fetch_cluster_stats() -> Dict[str, Dict]:
         except ValueError:
             pass
 
-        used = min(used, total)
+        is_down = state in ('DOWN', 'DRAIN', 'DRAINING', 'DRAINED')
+        if is_down:
+            used = total  # down nodes: all GPUs unavailable
+            agg[model]['_down_gpus'] += total
+            agg[model]['_down_nodes'] += 1
+        else:
+            used = min(used, total)
         agg[model]['Total'] += total
         agg[model]['Used']  += used
         agg[model]['Nodes'].append((node, state))
@@ -231,6 +238,8 @@ def fetch_cluster_stats() -> Dict[str, Dict]:
             'CPUperGPU': cpu_per_gpu,
             'RAMperGPU': ram_per_gpu,
             'Nodes': sorted(d['Nodes'], key=lambda x: x[0]),
+            'DownGPUs': d['_down_gpus'],
+            'DownNodes': d['_down_nodes'],
         }
     with _cluster_stats_lock:
         _cluster_stats_cache = (_time.monotonic(), result)
