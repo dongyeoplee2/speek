@@ -1,100 +1,79 @@
-# speek
+# 🔍 speek
 
-**[Documentation](https://edong6768.github.io/speek/)** | **[Changelog](CHANGELOG.md)**
-
-**speek** lets you peek into SLURM cluster resources — GPU availability, job status, user usage, priority scores, and more.
-
-![image](assets/screen.png)
-
-## Features
-
-- **Cluster overview** — GPU utilisation per model with colour-coded bars, demand pressure, and node ranges
-- **Job queue** — all RUNNING/PENDING jobs with priority scores and estimated wait times
-- **My Jobs** — your active jobs grouped by project, with history tab showing completed/failed jobs
-- **Events** — job state-change timeline with read/unread tracking and relaunch for failed jobs
-- **Node status** — per-node GPU breakdown with state indicators
-- **User analytics** — GPU-hours, success rates, fairshare scores
-- **Stats** — GPU usage timelines with sparkline charts and issue tracking
-- **Shell** — built-in command bar with autocomplete for all SLURM commands
-- **80+ themes** — base16 colour schemes + custom YAML themes
-- **Persistent settings** — save preferences, command history, and read state across sessions
+**speek** is a suite of SLURM cluster monitoring tools — from quick one-shot snapshots to a full interactive TUI.
 
 ## Installation
 
-### From GitHub (latest)
-
 ```sh
-pip install git+https://github.com/edong6768/speek.git
+pip install speek
 ```
 
-### From a specific branch
-
+For the latest development version:
 ```sh
-pip install git+https://github.com/edong6768/speek.git@changes/0.0.3
+pip install --pre speek
 ```
 
-### Development setup
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `speek0` | Classic one-shot cluster overview — GPU availability, per-user usage, job status |
+| `speek-` | Compact snapshot — per-model GPU bars, trends, pending pressure |
+| `speek+` | Full interactive TUI — queue, nodes, users, stats, events, shell |
+
+## speek0 — Classic Overview
 
 ```sh
-git clone https://github.com/edong6768/speek.git
-cd speek
-uv sync          # or: pip install -e .
+speek0 [-u USER] [-f FILE] [-t T_AVAIL]
 ```
 
-## Usage
-
-> **Note:** Run from a node or login shell with SLURM access (`squeue`, `sinfo`, `sacct`, etc.).
-
-### speek (classic)
-
-```sh
-speek [-u USER] [-l] [-f FILE] [-t T_AVAIL]
-```
-
-| Flag | Description |
-| ---- | ----------- |
+| Option | Description |
+|--------|-------------|
 | `-u USER` | Highlight a specific user (default: self) |
-| `-l` | Live refresh every 1 second |
-| `-f FILE` | User info file |
-| `-t T_AVAIL` | Upcoming release time window (e.g. `5m`, `1h`, `1d`) |
+| `-f FILE` | User info CSV file |
+| `-t T_AVAIL` | Time window for upcoming release, e.g. `5 m`, `1 h` |
 
-### speek-min
+Shows a table of GPU usage per partition, ranked users with `🥇🥈🥉`, utilization-colored counts, and your current jobs.
 
-```sh
-speek-min
-```
-
-Lightweight one-shot GPU availability bars.
-
-### speek-max (TUI)
+## speek- — Compact Snapshot
 
 ```sh
-speek-max [--theme THEME] [--user USER]
+speek- [-u USER]
 ```
 
-Full interactive terminal UI with tabs, themes, shell, and job management.
+Per-GPU-model view with utilization bars, free/total counts, pending pressure (`⏸N`), availability trends (`↑↓`), and your running/pending jobs. Detects down nodes and shows them as DEAD.
 
-| Key | Action |
-| --- | ------ |
-| `1`–`7` | Switch tabs (Queue, Nodes, Users, Stats, Settings, Info, Help) |
-| `d` | View job details |
-| `v` | Fold/unfold project groups |
-| `f` | Cycle focus between panels |
-| `:` | Focus the shell command bar |
-| `s` | Sort table by column |
-| `/` | Filter table rows |
-| `q` | Quit |
+## speek+ — Interactive TUI
 
-## Documentation
+```sh
+speek+
+```
 
-Full documentation is available at the [GitHub Pages site](https://edong6768.github.io/speek/):
+Full-featured Textual TUI with:
 
-- [Installation](https://edong6768.github.io/speek/installation.html)
-- [Quick Start](https://edong6768.github.io/speek/quickstart/index.html)
-- [Themes Guide](https://edong6768.github.io/speek/guides/themes.html)
-- [Changelog](https://edong6768.github.io/speek/changelog.html)
-- [API Reference](https://edong6768.github.io/speek/api/index.html)
+- **Cluster** — speek0-style usage table (tab 1)
+- **Queue** — all cluster jobs grouped by partition, foldable
+- **Nodes** — per-partition node status with usage bars
+- **Users** — per-user GPU usage, fairshare, per-partition breakdown
+- **Stats** — GPU usage charts, per-user stacked view, issue dashboard
+- **Logs** — session CLI output (not persisted)
+- **Settings** — theme, refresh rates, cache management, log scanning
+- **Info** — cluster probe results, scheduling factors, error detection rules
+- **Help** — keybindings reference
 
-## License
+### Features
 
-MIT
+- 70+ color themes (base16 standard)
+- OOM and error detection (11 error types) with log scanning
+- Job detail popup with stdout, stderr, GPU stats, analysis
+- Built-in shell with tab completion, history, sbatch suggestions
+- Per-job log hints in the table
+- Event notifications with read/unread tracking
+- Down node detection with DEAD indicators
+
+## Requirements
+
+- Python 3.8+
+- SLURM cluster with `squeue`, `scontrol`, `sinfo`
+- Optional: `sacct`, `sprio`, `sshare`, `sreport`, `scancel` for full features
+- `rich` (all commands), `textual>=0.50.0` (speek+ only)

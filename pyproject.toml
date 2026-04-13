@@ -10,7 +10,7 @@ packages = ["speek", "speek.data", "speek.speek_max", "speek.speek_max.widgets"]
 
 [project]
 name = "speek"
-version = "0.0.3"
+version = "0.0.3.dev1"
 description = "Peek into slurm's resource info such as GPU avaiability, usage per user, job status, and more."
 readme = "README.md"
 requires-python = ">=3.8"
