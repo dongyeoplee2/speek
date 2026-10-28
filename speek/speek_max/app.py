@@ -81,10 +81,11 @@ class SpeekMax(App[None]):
         Binding("q", "quit",                   "Quit",     show=True),
     ]
 
-    def __init__(self, theme_name: str = DEFAULT_THEME, user: str = "", **kwargs) -> None:
+    def __init__(self, theme_name: str = DEFAULT_THEME, user: str = "", show_cpu: bool = False, **kwargs) -> None:
         super().__init__(**kwargs)
         self._initial_theme = theme_name
         self.user = user or getpass.getuser()
+        self.show_cpu = show_cpu              # --cpu: also show CPU-only partitions
         self._issue_hours: int = 24
         # Refresh intervals (seconds)
         self._queue_refresh: int = 5
@@ -443,6 +444,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description='speek+: SLURM TUI')
     parser.add_argument('--theme', '-t', default=DEFAULT_THEME, choices=THEME_NAMES)
     parser.add_argument('--user', '-u', default=getpass.getuser())
+    parser.add_argument('--cpu', action='store_true', help='Also show CPU-only partitions.')
     args = parser.parse_args()
-    app = SpeekMax(theme_name=args.theme, user=args.user)
+    app = SpeekMax(theme_name=args.theme, user=args.user, show_cpu=args.cpu)
     app.run()

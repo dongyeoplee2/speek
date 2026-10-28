@@ -14,6 +14,7 @@ Optional flags:
 | ---- | ----------- |
 | `--theme THEME` | Start with a specific theme (e.g. `onedark`, `catppuccin`, `gruvbox`) |
 | `--user USER` | Override the detected username |
+| `--cpu` | Also show CPU-only partitions (cores) in the Cluster bar |
 
 ## Layout
 

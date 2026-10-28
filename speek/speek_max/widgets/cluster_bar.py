@@ -1,4 +1,4 @@
-"""cluster_bar.py — Always-visible GPU stats bar at top of screen."""
+"""cluster_bar.py — Always-visible GPU (and, with --cpu, CPU) stats bar at top of screen."""
 from __future__ import annotations
 
 import re
@@ -8,6 +8,7 @@ from rich.table import Table
 from rich.text import Text
 from textual.widgets import Static
 
+from speek.cpu_stats import fetch_cpu_jobs, fetch_cpu_stats
 from speek.speek_max.slurm import fetch_cluster_stats, fetch_job_stats
 from speek.speek_max._utils import tc
 
@@ -110,8 +111,10 @@ def build_cluster_renderable(
     stats: Dict[str, Dict],
     job_stats: Dict,
     tv: Dict[str, str],
+    cpu_stats: Dict[str, Dict] = None,
+    cpu_jobs: Dict[str, Dict] = None,
 ) -> object:
-    if not stats:
+    if not stats and not cpu_stats:
         return Text("No GPU data", style=tc(tv, 'text-muted', 'bright_black') + ' italic')
 
     text_muted   = tc(tv, 'text-muted',   'bright_black')
@@ -151,8 +154,6 @@ def build_cluster_renderable(
         t.append('|', style=text_muted)
         return t
 
-    models = sorted(stats, key=lambda m: stats[m]['Total'], reverse=True)
-
     by_model      = (job_stats or {}).get('by_model', {})
 
     table = Table(box=None, padding=(0, 0), show_header=False, expand=True)
@@ -165,109 +166,121 @@ def build_cluster_renderable(
     table.add_column('n_count', no_wrap=True)
     table.add_column('nodes',   no_wrap=True, min_width=8, max_width=30)
 
-    total_T = total_U = total_down = 0
-    for m in models:
-        d = stats[m]
-        T, U, F = d['Total'], d['Used'], d['Free']
-        pct = U / T if T else 0.0
-        pct_100 = pct * 100
-        total_T += T
-        total_U += U
-        down_gpus = d.get('DownGPUs', 0)
-        total_down += down_gpus
-        uc = _util_color(pct)
-        emoji = _usage_emoji(pct_100)
+    def _add_block(stats: Dict[str, Dict], pending: Dict[str, int], total_label: str) -> None:
+        """One row per GPU model / CPU partition, then a highlighted Total row."""
+        models = sorted(stats, key=lambda m: stats[m]['Total'], reverse=True)
+        total_T = total_U = total_down = 0
+        for m in models:
+            d = stats[m]
+            T, U, F = d['Total'], d['Used'], d['Free']
+            pct = U / T if T else 0.0
+            pct_100 = pct * 100
+            total_T += T
+            total_U += U
+            down = d.get('DownGPUs', d.get('DownCPUs', 0))
+            total_down += down
+            uc = _util_color(pct)
+            emoji = _usage_emoji(pct_100)
 
-        vram = d.get('VRAM')
-        all_down = down_gpus >= T and T > 0
+            vram = d.get('VRAM')
+            all_down = down >= T and T > 0
 
-        if all_down:
-            model_cell = Text(m, style='bright_black')
-            vram_cell = Text(f'{vram}G', style='bright_black') if vram else Text('')
-        else:
-            model_cell = Text(m, style=f'bold {uc}')
-            vram_cell = Text(f'{vram}G', style=text_muted) if vram else Text('')
+            if all_down:
+                model_cell = Text(m, style='bright_black')
+                vram_cell = Text(f'{vram}G', style='bright_black') if vram else Text('')
+            else:
+                model_cell = Text(m, style=f'bold {uc}')
+                vram_cell = Text(f'{vram}G', style=text_muted) if vram else Text('')
 
-        nodes = d.get('Nodes', [])
-        n_count = len(nodes)
+            nodes = d.get('Nodes', [])
+            n_count = len(nodes)
 
-        counts_cell = Text()
-        counts_cell.append(f' {F}', style=f'bold {uc}')
-        counts_cell.append('/', style=text_muted)
-        counts_cell.append(str(T), style=text_muted)
+            counts_cell = Text()
+            counts_cell.append(f' {F}', style=f'bold {uc}')
+            counts_cell.append('/', style=text_muted)
+            counts_cell.append(str(T), style=text_muted)
 
-        pending_jobs = by_model.get(m, {}).get('PD', 0)
-        demand_cell = Text()
-        if all_down:
-            demand_cell.append(f' ↓{down_gpus}', style='bold red')
-        elif down_gpus > 0:
-            demand_cell.append(f' ↓{down_gpus}', style='bold red')
-        elif pending_jobs:
-            pressure = pending_jobs / max(F, 1)
-            if pressure >= 2:
+            pending_jobs = pending.get(m, 0)
+            demand_cell = Text()
+            if all_down:
+                demand_cell.append(f' ↓{down}', style='bold red')
+            elif down > 0:
+                demand_cell.append(f' ↓{down}', style='bold red')
+            elif pending_jobs:
+                pressure = pending_jobs / max(F, 1)
+                if pressure >= 2:
+                    dc = _c_red
+                elif pressure >= 1:
+                    dc = _c_yellow
+                else:
+                    dc = text_muted
+                demand_cell.append(f' ↑{pending_jobs}', style=dc)
+            else:
+                demand_cell.append('     ', style=text_muted)
+
+            if all_down:
+                _ds = 'bright_black'
+                width = 16  # match _bar() default width
+                dead_bar = Text(f'|{"DEAD":^{width}}|', style='bright_black on black')
+                dead_cnt = Text()
+                dead_cnt.append(f' {F}', style=_ds)
+                dead_cnt.append('/', style=_ds)
+                dead_cnt.append(str(T), style=_ds)
+                table.add_row(
+                    model_cell, vram_cell, Text('', style=_ds),
+                    dead_bar, dead_cnt,
+                    Text('', style=_ds),
+                    Text(f' {n_count}× ', style=_ds),
+                    _node_range_text(nodes, tv),
+                )
+            else:
+                table.add_row(
+                    model_cell, vram_cell,
+                    Text(f'{emoji} '),
+                    _bar(U - down, T, down=down),
+                    counts_cell, demand_cell,
+                    Text(f' {n_count}× ', style=text_muted),
+                    _node_range_text(nodes, tv),
+                )
+
+        total_pct = total_U / total_T if total_T else 0.0
+        uc = _util_color(total_pct)
+        total_bg = tc(tv, 'border-blurred', 'bright_black')
+        total_counts = Text()
+        total_counts.append(f' {total_T - total_U}', style=f'bold {uc}')
+        total_counts.append('/', style=text_muted)
+        total_counts.append(str(total_T), style=text_muted)
+        total_pd = sum(pending.get(m, 0) for m in models)
+        total_demand = Text()
+        if total_pd:
+            total_pressure = total_pd / max(total_T - total_U, 1)
+            if total_pressure >= 2:
                 dc = _c_red
-            elif pressure >= 1:
+            elif total_pressure >= 1:
                 dc = _c_yellow
             else:
                 dc = text_muted
-            demand_cell.append(f' ↑{pending_jobs}', style=dc)
-        else:
-            demand_cell.append('     ', style=text_muted)
+            total_demand.append(f' ↑{total_pd}', style=dc)
+        table.add_row(
+            Text(total_label, style=f'bold {uc}'),
+            Text(''),
+            Text(f'{_usage_emoji(total_pct * 100)} '),
+            _bar(total_U - total_down, total_T, down=total_down),
+            total_counts,
+            total_demand,
+            Text(''),
+            Text(''),
+            style=f'on {total_bg}',
+        )
 
-        if all_down:
-            _ds = 'bright_black'
-            width = 16  # match _bar() default width
-            dead_bar = Text(f'|{"DEAD":^{width}}|', style='bright_black on black')
-            dead_cnt = Text()
-            dead_cnt.append(f' {F}', style=_ds)
-            dead_cnt.append('/', style=_ds)
-            dead_cnt.append(str(T), style=_ds)
-            table.add_row(
-                model_cell, vram_cell, Text('', style=_ds),
-                dead_bar, dead_cnt,
-                Text('', style=_ds),
-                Text(f' {n_count}× ', style=_ds),
-                _node_range_text(nodes, tv),
-            )
-        else:
-            table.add_row(
-                model_cell, vram_cell,
-                Text(f'{emoji} '),
-                _bar(U - down_gpus, T, down=down_gpus),
-                counts_cell, demand_cell,
-                Text(f' {n_count}× ', style=text_muted),
-                _node_range_text(nodes, tv),
-            )
-
-    total_pct = total_U / total_T if total_T else 0.0
-    uc = _util_color(total_pct)
-    total_bg = tc(tv, 'border-blurred', 'bright_black')
-    total_counts = Text()
-    total_counts.append(f' {total_T - total_U}', style=f'bold {uc}')
-    total_counts.append('/', style=text_muted)
-    total_counts.append(str(total_T), style=text_muted)
-    total_pd = sum(by_model.get(m, {}).get('PD', 0) for m in models)
-    total_demand = Text()
-    if total_pd:
-        total_pressure = total_pd / max(total_T - total_U, 1)
-        if total_pressure >= 2:
-            dc = _c_red
-        elif total_pressure >= 1:
-            dc = _c_yellow
-        else:
-            dc = text_muted
-        total_demand.append(f' ↑{total_pd}', style=dc)
-    table.add_row(
-        Text('Total', style=f'bold {uc}'),
-        Text(''),
-        Text(f'{_usage_emoji(total_pct * 100)} '),
-        _bar(total_U - total_down, total_T, down=total_down),
-        total_counts,
-        total_demand,
-        Text(''),
-        Text(''),
-        style=f'on {total_bg}',
-    )
+    if stats:
+        _add_block(stats, {m: v.get('PD', 0) for m, v in by_model.items()},
+                   'GPU Total' if cpu_stats else 'Total')
+    if cpu_stats:
+        if stats:
+            table.add_row()
+        _add_block(cpu_stats, {p: j['pending_jobs'] for p, j in (cpu_jobs or {}).items()},
+                   'CPU Total')
 
     return table
 
@@ -283,16 +296,21 @@ class ClusterBar(Static):
 
     def _refresh_data(self) -> None:
         tv = self.app.theme_variables
+        show_cpu = getattr(self.app, 'show_cpu', False)
         self.run_worker(
-            lambda: self._fetch(tv),
+            lambda: self._fetch(tv, show_cpu),
             thread=True, exclusive=True, group='cluster-bar',
         )
 
-    def _fetch(self, tv: Dict) -> None:
+    def _fetch(self, tv: Dict, show_cpu: bool = False) -> None:
         from textual.worker import get_current_worker
         worker = get_current_worker()
         stats     = fetch_cluster_stats()
         job_stats = fetch_job_stats()
+        cpu_stats = cpu_jobs = None
+        if show_cpu:
+            cpu_stats = fetch_cpu_stats()
+            cpu_jobs  = fetch_cpu_jobs(cpu_stats)
         if not worker.is_cancelled:
-            renderable = build_cluster_renderable(stats, job_stats, tv)
+            renderable = build_cluster_renderable(stats, job_stats, tv, cpu_stats, cpu_jobs)
             self.app.call_from_thread(self.update, renderable)

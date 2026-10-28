@@ -23,6 +23,8 @@ from rich.text import Text
 
 parser = argparse.ArgumentParser(description='speek-: cluster GPU snapshot')
 parser.add_argument('-u', '--user', type=str, default=None)
+parser.add_argument('--cpu', action='store_true', help='Also show CPU-only partitions.')
+parser.add_argument('-p', '--partition', action='store_true', help='Group GPUs by partition instead of GPU model.')
 args = parser.parse_args()
 
 # ── Regex ────────────────────────────────────────────────────────────────────
@@ -62,7 +64,8 @@ def _util_color(pct: float) -> str:
 # taken in the last 5 min — competition is high, submit now.
 # ↑2 means 2 freed up — no rush.
 
-_TREND_FILE = Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache')) / 'speek' / 'usage_trend.json'
+_TREND_FILE = (Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache')) / 'speek'
+               / ('usage_trend_partition.json' if args.partition else 'usage_trend.json'))
 _TREND_WINDOW = 300     # compare to ~5 minutes ago
 _TREND_MAX_HISTORY = 60  # keep max 60 snapshots (~30 min at 30s intervals)
 
@@ -216,10 +219,12 @@ _MODEL_VRAM: Dict[str, int] = {
     'V100-32GB': 32, 'V100': 16, 'T4': 16,
 }
 _FLEX_RE = re.compile(r'gpu(?::[A-Za-z0-9_\-]+)?:(\d+)', re.IGNORECASE)
+_PART_MODEL: Dict[str, str] = {}  # partition → GPU model, filled by _fetch_cluster()
 
 
-def _fetch_cluster() -> Dict[str, Dict]:
-    """Return {model: {Total, Used, Free, VRAM, CPUperGPU, RAMperGPU, Nodes}} from scontrol."""
+def _fetch_cluster(by_partition: bool = False) -> Dict[str, Dict]:
+    """Return {model: {Total, Used, Free, VRAM, CPUperGPU, RAMperGPU, Nodes}} from scontrol.
+    With by_partition, keys are partitions instead (a node in several partitions counts in each)."""
     out = _run(['scontrol', 'show', 'node', '--oneliner'])
     if not out:
         return {}
@@ -227,7 +232,7 @@ def _fetch_cluster() -> Dict[str, Dict]:
     agg: Dict[str, Dict] = defaultdict(lambda: {
         'Total': 0, 'Used': 0, 'Nodes': [],
         '_cpu': 0, '_mem': 0,
-        '_down_gpus': 0, '_down_nodes': 0,
+        '_down_gpus': 0, '_down_nodes': 0, '_model': '',
     })
     seen: Dict[str, set] = defaultdict(set)
 
@@ -276,25 +281,30 @@ def _fetch_cluster() -> Dict[str, Dict]:
         except ValueError:
             mem = 0
 
-        agg[model]['Total'] += total
-        if state in ('DOWN', 'DRAIN', 'DRAINING', 'DRAINED'):
-            agg[model]['Used'] += total  # down nodes: all GPUs unavailable
-            agg[model]['_down_gpus'] += total
-            agg[model]['_down_nodes'] += 1
-        else:
-            agg[model]['Used'] += used
-        agg[model]['_cpu'] += cpu
-        agg[model]['_mem'] += mem
-        if node not in seen[model]:
-            seen[model].add(node)
-            agg[model]['Nodes'].append((node, state))
+        parts = [p for p in _f('Partitions').split(',') if p]
+        for p in parts:
+            _PART_MODEL.setdefault(p, model)
+        for key in (parts if by_partition else [model]):
+            agg[key]['Total'] += total
+            if state in ('DOWN', 'DRAIN', 'DRAINING', 'DRAINED'):
+                agg[key]['Used'] += total  # down nodes: all GPUs unavailable
+                agg[key]['_down_gpus'] += total
+                agg[key]['_down_nodes'] += 1
+            else:
+                agg[key]['Used'] += used
+            agg[key]['_cpu'] += cpu
+            agg[key]['_mem'] += mem
+            agg[key]['_model'] = model
+            if node not in seen[key]:
+                seen[key].add(node)
+                agg[key]['Nodes'].append((node, state))
 
     result: Dict[str, Dict] = {}
     for m, d in agg.items():
         n_gpus = d['Total'] or 1
-        vram = _MODEL_VRAM.get(m)
+        vram = _MODEL_VRAM.get(d['_model'])
         if vram is None:
-            mv = re.search(r'(\d+)GB', m, re.IGNORECASE)
+            mv = re.search(r'(\d+)GB', d['_model'], re.IGNORECASE)
             vram = int(mv.group(1)) if mv else None
         result[m] = {
             'Total': d['Total'],
@@ -310,20 +320,23 @@ def _fetch_cluster() -> Dict[str, Dict]:
     return result
 
 
-def _fetch_pending() -> Dict[str, int]:
-    """Return {model: pending_job_count}."""
+def _fetch_pending(by_partition: bool = False) -> Dict[str, int]:
+    """Return {model: pending_job_count}, or {partition: ...} with by_partition."""
     out = _run(['squeue', '-t', 'PD', '-o', '%P|%b', '-h'])
     counts: Dict[str, int] = defaultdict(int)
     for ln in out.splitlines():
         if not ln.strip():
             continue
         parts = (ln.split('|') + ['', ''])[:2]
-        part, gres = parts
+        part, gres = parts[0].split(',')[0].strip(), parts[1]
         m = _GPU_RE.search(gres or '')
-        if m:
+        if by_partition:
+            if part:
+                counts[part] += 1
+        elif m:
             counts[m.group(1)] += 1
-        elif part.strip():
-            counts[part.strip()] += 1
+        elif part:
+            counts[_PART_MODEL.get(part, part)] += 1
     return dict(counts)
 
 
@@ -454,18 +467,19 @@ def _line_width(show_nodes: bool) -> int:
 
 
 def build_panel(stats: Dict[str, Dict], my_gpus: Dict,
-                term_w: int = 80, term_h: int = 24, user: str = '') -> Panel:
+                term_w: int = 80, term_h: int = 24, user: str = '',
+                cpu_stats: Optional[Dict[str, Dict]] = None,
+                cpu_jobs: Optional[Dict[str, Dict]] = None) -> Panel:
     """Build a Rich Panel, auto-arranging into multi-column when terminal is wide but short."""
-    if not stats:
+    if not stats and not cpu_stats:
         return Panel(
             Text('No GPU data', style='bright_black italic'),
             title='[bold]speek-[/bold]',
             border_style='bright_black',
         )
 
-    pending = _fetch_pending()
-    trends = _compute_trends(stats)
-    models = sorted(stats, key=lambda m: stats[m]['Total'], reverse=True)
+    pending = _fetch_pending(args.partition) if stats else {}
+    trends = _compute_trends(stats) if stats else {}
     has_any_trend = bool(trends)
 
     # Build table
@@ -482,117 +496,128 @@ def build_panel(stats: Dict[str, Dict], my_gpus: Dict,
     table.add_column('sep', no_wrap=True, width=1)
     table.add_column('my', no_wrap=True)
 
-    total_T = total_U = 0
-    for m in models:
-        d = stats[m]
-        T, U, F = d['Total'], d['Used'], d['Free']
-        total_T += T
-        total_U += U
-        pct = U / T if T else 0.0
-        uc = _util_color(pct)
-
-        emoji = _usage_emoji(pct * 100)
-        vram = d.get('VRAM')
-
-        cnt_t = Text()
-        cnt_t.append(f'{F}', style=f'bold {uc}')
-        cnt_t.append(f'/{T}', style='bright_black')
-
-        pd = pending.get(m, 0)
-        dem_t = Text()
+    def _my_text(r: int, pd: int) -> Text:
+        t = Text()
+        if r:
+            t.append(f'▶{r}', style='bold green')
         if pd:
-            pressure = pd / max(F, 1)
-            dc = 'red' if pressure >= 2 else ('yellow' if pressure >= 1 else 'bright_black')
-            dem_t.append(f'⏸{pd}', style=dc)
+            if r:
+                t.append(' ')
+            t.append(f'⏸{pd}', style='bold yellow')
+        return t
 
-        trend_t = Text()
-        trend = trends.get(m)
-        if trend:
-            arrow, delta = trend
-            trend_t.append(f'{arrow}{delta}', style='bold green' if arrow == '↑' else 'bold red')
+    def _add_block(stats: Dict[str, Dict], pending: Dict, my: Dict, trends: Dict,
+                   total_label: str, end_section: bool = False) -> None:
+        """Add one row per model/partition plus a Total row."""
+        models = sorted(stats, key=lambda m: stats[m]['Total'], reverse=True)
+        total_T = total_U = 0
+        for m in models:
+            d = stats[m]
+            T, U, F = d['Total'], d['Used'], d['Free']
+            total_T += T
+            total_U += U
+            pct = U / T if T else 0.0
+            uc = _util_color(pct)
 
-        mg = my_gpus.get(m, {})
-        my_r, my_pd = mg.get('R', 0), mg.get('PD', 0)
-        my_t = Text()
-        if my_r:
-            my_t.append(f'▶{my_r}', style='bold green')
-        if my_pd:
-            if my_r:
-                my_t.append(' ')
-            my_t.append(f'⏸{my_pd}', style='bold yellow')
+            emoji = _usage_emoji(pct * 100)
+            vram = d.get('VRAM')
 
-        down_gpus = d.get('DownGPUs', 0)
-        all_down = down_gpus >= T and T > 0
+            cnt_t = Text()
+            cnt_t.append(f'{F}', style=f'bold {uc}')
+            cnt_t.append(f'/{T}', style='bright_black')
 
-        if all_down:
-            _ds = 'dim '
-            dead_bar = Text()
-            dead_bar.append(f'|{"DEAD":^{14}}|', style='dim on black')
-            row = [
-                Text(m, style='dim '),
-                Text(f'{vram}G', style=_ds) if vram else Text('', style=_ds),
-                Text('', style=_ds),
-                dead_bar,
-                Text(f'{F}/{T}', style=_ds),
-                Text('', style=_ds),
-            ]
-        elif down_gpus > 0:
-            # Some nodes down: show down count after demand
-            down_t = Text()
-            down_t.append(f'↓{down_gpus}', style='bold red')
-            row = [
-                Text(m, style=f'bold {uc}'),
-                Text(f'{vram}G', style='bright_black') if vram else Text(''),
-                Text(emoji),
-                _bar(U - down_gpus, T, 14, down=down_gpus),
-                cnt_t,
-                dem_t if dem_t.plain else down_t,
-            ]
-        else:
-            row = [
-                Text(m, style=f'bold {uc}'),
-                Text(f'{vram}G', style='bright_black') if vram else Text(''),
-                Text(emoji),
-                _bar(U, T, 14, down=0),
-                cnt_t,
-                dem_t,
-            ]
-        _bg = ''
+            pd = pending.get(m, 0)
+            dem_t = Text()
+            if pd:
+                pressure = pd / max(F, 1)
+                dc = 'red' if pressure >= 2 else ('yellow' if pressure >= 1 else 'bright_black')
+                dem_t.append(f'⏸{pd}', style=dc)
+
+            trend_t = Text()
+            trend = trends.get(m)
+            if trend:
+                arrow, delta = trend
+                trend_t.append(f'{arrow}{delta}', style='bold green' if arrow == '↑' else 'bold red')
+
+            mg = my.get(m, {})
+            my_t = _my_text(mg.get('R', 0), mg.get('PD', 0))
+
+            down = d.get('DownGPUs', d.get('DownCPUs', 0))
+            all_down = down >= T and T > 0
+
+            if all_down:
+                _ds = 'dim '
+                dead_bar = Text()
+                dead_bar.append(f'|{"DEAD":^{14}}|', style='dim on black')
+                row = [
+                    Text(m, style='dim '),
+                    Text(f'{vram}G', style=_ds) if vram else Text('', style=_ds),
+                    Text('', style=_ds),
+                    dead_bar,
+                    Text(f'{F}/{T}', style=_ds),
+                    Text('', style=_ds),
+                ]
+            elif down > 0:
+                # Some nodes down: show down count after demand
+                down_t = Text()
+                down_t.append(f'↓{down}', style='bold red')
+                row = [
+                    Text(m, style=f'bold {uc}'),
+                    Text(f'{vram}G', style='bright_black') if vram else Text(''),
+                    Text(emoji),
+                    _bar(U - down, T, 14, down=down),
+                    cnt_t,
+                    dem_t if dem_t.plain else down_t,
+                ]
+            else:
+                row = [
+                    Text(m, style=f'bold {uc}'),
+                    Text(f'{vram}G', style='bright_black') if vram else Text(''),
+                    Text(emoji),
+                    _bar(U, T, 14, down=0),
+                    cnt_t,
+                    dem_t,
+                ]
+            _bg = ''
+            if has_any_trend:
+                row.append(trend_t if not all_down else Text('', style=f'dim {_bg}'))
+            row.append(Text('│', style=f'dim {_bg}') if all_down else Text('│', style='bright_black'))
+            row.append(Text('', style=f'dim {_bg}') if all_down else my_t)
+            table.add_row(*row)
+
+        # Total row (separated by line above via end_section)
+        total_pct = total_U / total_T if total_T else 0.0
+        uc = _util_color(total_pct)
+        total_emoji = _usage_emoji(total_pct * 100)
+        tcnt = Text()
+        tcnt.append(f'{total_T - total_U}', style=f'bold {uc}')
+        tcnt.append(f'/{total_T}', style='bright_black')
+        my_total = _my_text(sum(v.get('R', 0) for v in my.values()),
+                            sum(v.get('PD', 0) for v in my.values()))
+        total_row = [
+            Text(total_label, style=f'bold {uc}'),
+            Text(''),
+            Text(total_emoji if total_emoji else ''),
+            _bar(total_U, total_T, 14),
+            tcnt,
+            Text(''),
+        ]
         if has_any_trend:
-            row.append(trend_t if not all_down else Text('', style=f'dim {_bg}'))
-        row.append(Text('│', style=f'dim {_bg}') if all_down else Text('│', style='bright_black'))
-        row.append(Text('', style=f'dim {_bg}') if all_down else my_t)
-        table.add_row(*row)
+            total_row.append(Text(''))
+        total_row.append(Text('│', style='bright_black'))
+        total_row.append(my_total)
+        table.add_row(*total_row, end_section=end_section)
 
-    # Total row (separated by line above via end_section)
-    total_pct = total_U / total_T if total_T else 0.0
-    uc = _util_color(total_pct)
-    total_emoji = _usage_emoji(total_pct * 100)
-    tcnt = Text()
-    tcnt.append(f'{total_T - total_U}', style=f'bold {uc}')
-    tcnt.append(f'/{total_T}', style='bright_black')
-    total_my_r = sum(v.get('R', 0) for v in my_gpus.values())
-    total_my_pd = sum(v.get('PD', 0) for v in my_gpus.values())
-    my_total = Text()
-    if total_my_r:
-        my_total.append(f'▶{total_my_r}', style='bold green')
-    if total_my_pd:
-        if total_my_r:
-            my_total.append(' ')
-        my_total.append(f'⏸{total_my_pd}', style='bold yellow')
-    total_row = [
-        Text('Total', style=f'bold {uc}'),
-        Text(''),
-        Text(total_emoji if total_emoji else ''),
-        _bar(total_U, total_T, 14),
-        tcnt,
-        Text(''),
-    ]
-    if has_any_trend:
-        total_row.append(Text(''))
-    total_row.append(Text('│', style='bright_black'))
-    total_row.append(my_total)
-    table.add_row(*total_row)
+    if stats:
+        _add_block(stats, pending, my_gpus, trends, 'Total' if not cpu_stats else 'GPU Total',
+                   end_section=bool(cpu_stats))
+    if cpu_stats:
+        cpu_jobs = cpu_jobs or {}
+        cpu_pending = {p: j['pending_jobs'] for p, j in cpu_jobs.items()}
+        cpu_my = {p: j['users'][user] for p, j in cpu_jobs.items() if user in j['users']}
+        if stats:
+            table.add_row()
+        _add_block(cpu_stats, cpu_pending, cpu_my, {}, 'CPU Total')
 
     subtitle = f'[dim]{user}[/dim]'
     content = table
@@ -632,9 +657,22 @@ def main() -> None:
     console = Console()
     w, h = console.size
     user = args.user or _run(['whoami']).strip()
-    stats = _fetch_cluster()
+    stats = _fetch_cluster(args.partition)
     my_gpus = _fetch_my_gpus(user)
-    panel = build_panel(stats, my_gpus, term_w=w, term_h=h, user=user)
+    if not args.partition:  # re-key my partition counts by GPU model
+        by_model: Dict[str, Dict[str, int]] = defaultdict(lambda: {'R': 0, 'PD': 0})
+        for part, c in my_gpus.items():
+            mc = by_model[_PART_MODEL.get(part, part)]
+            mc['R'] += c['R']
+            mc['PD'] += c['PD']
+        my_gpus = dict(by_model)
+    cpu_stats = cpu_jobs = None
+    if args.cpu:
+        from speek.cpu_stats import fetch_cpu_jobs, fetch_cpu_stats
+        cpu_stats = fetch_cpu_stats()
+        cpu_jobs = fetch_cpu_jobs(cpu_stats)
+    panel = build_panel(stats, my_gpus, term_w=w, term_h=h, user=user,
+                        cpu_stats=cpu_stats, cpu_jobs=cpu_jobs)
     console.print()
     console.print(Align(panel, align='center'))
     console.print()

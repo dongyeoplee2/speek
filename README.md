@@ -24,7 +24,7 @@ pip install --pre speek
 ## speek0 — Classic Overview
 
 ```sh
-speek0 [-u USER] [-f FILE] [-t T_AVAIL]
+speek0 [-u USER] [-f FILE] [-t T_AVAIL] [-p] [--cpu]
 ```
 
 | Option | Description |
@@ -32,22 +32,32 @@ speek0 [-u USER] [-f FILE] [-t T_AVAIL]
 | `-u USER` | Highlight a specific user (default: self) |
 | `-f FILE` | User info CSV file |
 | `-t T_AVAIL` | Time window for upcoming release, e.g. `5 m`, `1 h` |
+| `-p`, `--partition` | Group GPUs by partition instead of GPU model |
+| `--cpu` | Also show CPU-only partitions (cores) in a separate panel |
 
-Shows a table of GPU usage per partition, ranked users with `🥇🥈🥉`, utilization-colored counts, and your current jobs.
+Shows a table of GPU usage per GPU model (or per partition with `-p`), ranked users with `🥇🥈🥉`, utilization-colored counts, and your current jobs.
 
 ## speek- — Compact Snapshot
 
 ```sh
-speek- [-u USER]
+speek- [-u USER] [-p] [--cpu]
 ```
 
-Per-GPU-model view with utilization bars, free/total counts, pending pressure (`⏸N`), availability trends (`↑↓`), and your running/pending jobs. Detects down nodes and shows them as DEAD.
+| Option | Description |
+|--------|-------------|
+| `-u USER` | Highlight a specific user (default: self) |
+| `-p`, `--partition` | Group GPUs by partition instead of GPU model |
+| `--cpu` | Also show CPU-only partitions (cores) below the GPU rows |
+
+Per-GPU-model view (per-partition with `-p`) with utilization bars, free/total counts, pending pressure (`⏸N`), availability trends (`↑↓`), and your running/pending jobs. Detects down nodes and shows them as DEAD.
 
 ## speek+ — Interactive TUI
 
 ```sh
-speek+
+speek+ [-t THEME] [-u USER] [--cpu]
 ```
+
+`--cpu` adds CPU-only partitions (cores) to the Cluster bar.
 
 Full-featured Textual TUI with:
 

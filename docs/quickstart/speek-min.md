@@ -18,6 +18,8 @@ Prints a one-shot snapshot. Startup is near-instant since it avoids file I/O.
 | `-u USER` | `--user USER` | Highlight a specific user (default: yourself) |
 | `-l` | `--live` | Refresh every 1 second |
 | `-n` | `--nodes` | Show per-node GPU breakdown |
+| `-p` | `--partition` | Group GPUs by partition instead of GPU model |
+|  | `--cpu` | Also show CPU-only partitions (cores) below the GPU rows |
 
 ## Live mode
 

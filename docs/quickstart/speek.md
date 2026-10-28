@@ -19,6 +19,8 @@ Run once and print. The output is a formatted table per partition with GPU state
 | `-l` | `--live` | Refresh every 1 second |
 | `-f FILE` | `--file FILE` | Load user info from a file |
 | `-t T_AVAIL` | `--t_avail T_AVAIL` | Time window for upcoming GPU releases, e.g. `5m`, `2h`, `1d` (default: `5m`) |
+| `-p` | `--partition` | Group GPUs by partition instead of GPU model |
+|  | `--cpu` | Also show CPU-only partitions (cores) in a separate CPU Usage panel |
 
 ## Live mode
 

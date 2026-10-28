@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+
+- `--cpu` for `speek0`, `speek-` and `speek+` — show CPU-only partitions (free/total cores, pending jobs, per-user cores)
+- `-p` / `--partition` for `speek0` and `speek-` — group GPUs by partition; both now group by GPU model by default
+
+### Fixed
+
+- `speek0` showing 0/0 GPUs (and crashing) on clusters without `TRESBillingWeights`
+- `speek-` not showing your own running/pending GPUs in the per-model view
+
 ## [0.0.3] - 2026-03-20
 
 ### Added
